@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'src-go/**'
+      - 'k8s-go/**'
     branches: [ main ]
 
 permissions:
