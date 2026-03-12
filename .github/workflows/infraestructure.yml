@@ -372,19 +372,19 @@ jobs:
           echo "✅ eksClusterRole created and policy attached"
         fi
 
-        # Create EKS Node Role
-        if aws iam get-role --role-name AmazonEKSNodeRole > /dev/null 2>&1; then
-          echo "✅ AmazonEKSNodeRole already exists"
+        # Create Fargate Pod Execution Role
+        if aws iam get-role --role-name AmazonEKSFargatePodExecutionRole > /dev/null 2>&1; then
+          echo "✅ AmazonEKSFargatePodExecutionRole already exists"
         else
-          echo "📝 Creating AmazonEKSNodeRole..."
-          cat > /tmp/ec2-trust-policy.json <<'TRUSTEOF'
+          echo "📝 Creating AmazonEKSFargatePodExecutionRole..."
+          cat > /tmp/fargate-trust-policy.json <<'TRUSTEOF'
         {
           "Version": "2012-10-17",
           "Statement": [
             {
               "Effect": "Allow",
               "Principal": {
-                "Service": "ec2.amazonaws.com"
+                "Service": "eks-fargate-pods.amazonaws.com"
               },
               "Action": "sts:AssumeRole"
             }
@@ -392,27 +392,24 @@ jobs:
         }
         TRUSTEOF
           aws iam create-role \
-            --role-name AmazonEKSNodeRole \
-            --assume-role-policy-document file:///tmp/ec2-trust-policy.json
+            --role-name AmazonEKSFargatePodExecutionRole \
+            --assume-role-policy-document file:///tmp/fargate-trust-policy.json
           aws iam attach-role-policy \
-            --role-name AmazonEKSNodeRole \
-            --policy-arn arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+            --role-name AmazonEKSFargatePodExecutionRole \
+            --policy-arn arn:aws:iam::aws:policy/AmazonEKSFargatePodExecutionRolePolicy
           aws iam attach-role-policy \
-            --role-name AmazonEKSNodeRole \
-            --policy-arn arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
-          aws iam attach-role-policy \
-            --role-name AmazonEKSNodeRole \
+            --role-name AmazonEKSFargatePodExecutionRole \
             --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
-          echo "✅ AmazonEKSNodeRole created and policies attached"
+          echo "✅ AmazonEKSFargatePodExecutionRole created and policies attached"
         fi
 
         EKS_CLUSTER_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/eksClusterRole"
-        EKS_NODE_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/AmazonEKSNodeRole"
+        FARGATE_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/AmazonEKSFargatePodExecutionRole"
         echo "🔑 Cluster Role: $EKS_CLUSTER_ROLE_ARN"
-        echo "🔑 Node Role: $EKS_NODE_ROLE_ARN"
+        echo "🔑 Fargate Role: $FARGATE_ROLE_ARN"
 
-        # 5. Create EKS Cluster
-        echo "☸️ Creating EKS Cluster (this may take 15-20 minutes)..."
+        # 5. Create EKS Cluster with Fargate
+        echo "☸️ Creating EKS Cluster with Fargate (this may take 15-20 minutes)..."
         if eksctl get cluster --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
           echo "⚠️ EKS cluster already exists: ${{ env.EKS_CLUSTER_NAME }}"
         else
@@ -424,14 +421,16 @@ jobs:
           region: ${{ env.AWS_REGION }}
         iam:
           serviceRoleARN: "${EKS_CLUSTER_ROLE_ARN}"
-        nodeGroups:
-          - name: ng-edteam
-            instanceType: t3.small
-            desiredCapacity: 1
-            minSize: 1
-            maxSize: 2
-            iam:
-              instanceRoleARN: "${EKS_NODE_ROLE_ARN}"
+        fargateProfiles:
+          - name: fp-default
+            selectors:
+              - namespace: default
+              - namespace: kube-system
+            podExecutionRoleARN: "${FARGATE_ROLE_ARN}"
+          - name: fp-traefik
+            selectors:
+              - namespace: traefik
+            podExecutionRoleARN: "${FARGATE_ROLE_ARN}"
         EOF
 
           echo "📋 Cluster config:"
@@ -439,7 +438,7 @@ jobs:
 
           eksctl create cluster -f /tmp/cluster-config.yaml --verbose 4 || {
             echo "❌ Cluster creation failed. Fetching CloudFormation events..."
-            for STACK_SUFFIX in "cluster" "nodegroup-ng-edteam"; do
+            for STACK_SUFFIX in "cluster" "fargate"; do
               STACK_NAME="eksctl-${{ env.EKS_CLUSTER_NAME }}-${STACK_SUFFIX}"
               echo ""
               echo "📋 Events for $STACK_NAME:"
@@ -451,7 +450,17 @@ jobs:
             done
             exit 1
           }
-          echo "✅ EKS Cluster created"
+          echo "✅ EKS Cluster with Fargate created"
+
+          # Patch CoreDNS to run on Fargate (remove ec2 compute-type annotation)
+          echo "🔧 Patching CoreDNS for Fargate..."
+          aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+          kubectl patch deployment coredns -n kube-system --type json \
+            -p='[{"op": "remove", "path": "/spec/template/metadata/annotations/eks.amazonaws.com~1compute-type"}]' 2>/dev/null || true
+          kubectl rollout restart deployment coredns -n kube-system
+          echo "⏳ Waiting for CoreDNS to be ready..."
+          kubectl rollout status deployment coredns -n kube-system --timeout=300s
+          echo "✅ CoreDNS running on Fargate"
         fi
 
         # 4. Update kubeconfig
@@ -475,7 +484,7 @@ jobs:
 
         echo "✅ ECR access configured via Kubernetes secret"
 
-        # 6. Install Traefik Ingress Controller via Helm
+        # 6. Install Traefik Ingress Controller via Helm (Fargate compatible)
         echo "🌐 Installing Traefik Ingress Controller..."
         if kubectl get namespace traefik > /dev/null 2>&1; then
           echo "✅ Traefik Ingress Controller already installed"
@@ -486,13 +495,16 @@ jobs:
           helm install traefik traefik/traefik \
             --namespace traefik \
             --create-namespace \
-            --set service.type=LoadBalancer
+            --set service.type=LoadBalancer \
+            --set service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"=nlb \
+            --set deployment.kind=Deployment \
+            --set hostNetwork=false
 
-          echo "⏳ Waiting for Traefik Ingress Controller..."
+          echo "⏳ Waiting for Traefik Ingress Controller (Fargate pods take longer)..."
           kubectl wait --namespace traefik \
             --for=condition=ready pod \
             --selector=app.kubernetes.io/name=traefik \
-            --timeout=300s
+            --timeout=600s
         fi
 
         echo ""
@@ -622,7 +634,7 @@ jobs:
 
         # Delete IAM roles
         echo "🗑️ Cleaning up IAM roles..."
-        for ROLE_NAME in AmazonEKSNodeRole eksClusterRole; do
+        for ROLE_NAME in AmazonEKSFargatePodExecutionRole eksClusterRole; do
           if aws iam get-role --role-name $ROLE_NAME > /dev/null 2>&1; then
             echo "Detaching policies from $ROLE_NAME..."
             POLICIES=$(aws iam list-attached-role-policies --role-name $ROLE_NAME --query "AttachedPolicies[].PolicyArn" --output text)
