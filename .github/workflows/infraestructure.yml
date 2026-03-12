@@ -424,7 +424,7 @@ jobs:
           region: ${{ env.AWS_REGION }}
         iam:
           serviceRoleARN: "${EKS_CLUSTER_ROLE_ARN}"
-        managedNodeGroups:
+        nodeGroups:
           - name: ng-edteam
             instanceType: t3.small
             desiredCapacity: 1
