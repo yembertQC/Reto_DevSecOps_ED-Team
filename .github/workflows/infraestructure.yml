@@ -284,14 +284,18 @@ jobs:
         aws-region: ${{ env.AWS_REGION }}
 
     - name: Create AWS Infrastructure
+      timeout-minutes: 30
       run: |
-        echo "=== CREATING AWS INFRASTRUCTURE ==="
+        echo "=== CREATING AWS INFRASTRUCTURE (Pure CLI - No eksctl/CloudFormation) ==="
         echo ""
         echo "Resources to create:"
         echo "- ECR Repository: ${{ env.ECR_REPOSITORY_NAME }}"
         echo "- EKS Cluster: ${{ env.EKS_CLUSTER_NAME }}"
         echo "- Region: ${{ env.AWS_REGION }}"
         echo ""
+
+        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        echo "AWS Account: $AWS_ACCOUNT_ID"
 
         # 1. Create ECR Repository
         echo "🐳 Creating ECR Repository..."
@@ -305,206 +309,346 @@ jobs:
           echo "✅ ECR repository created: ${{ env.ECR_REPOSITORY_NAME }}"
         fi
 
-        ECR_URI=$(aws ecr describe-repositories \
-          --repository-names ${{ env.ECR_REPOSITORY_NAME }} \
-          --query 'repositories[0].repositoryUri' --output text)
-        echo "ECR_URI=$ECR_URI" >> $GITHUB_ENV
+        # 2. Create IAM roles
+        echo "🔑 Setting up IAM roles..."
 
-        # 2. Install eksctl
-        echo "📦 Installing eksctl..."
-        curl --silent --location \
-          "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" \
-          | tar xz -C /tmp
-        sudo mv /tmp/eksctl /usr/local/bin
-        eksctl version
-
-        # 3. Cleanup any failed CloudFormation stacks
-        echo "🧹 Checking for leftover CloudFormation stacks..."
-        STACK_STATUS=$(aws cloudformation describe-stacks \
-          --stack-name "eksctl-${{ env.EKS_CLUSTER_NAME }}-cluster" \
-          --region ${{ env.AWS_REGION }} \
-          --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NOT_FOUND")
-
-        if [[ "$STACK_STATUS" == *"ROLLBACK"* ]] || [[ "$STACK_STATUS" == *"FAILED"* ]]; then
-          echo "🗑️ Deleting failed stack (status: $STACK_STATUS)..."
-          aws cloudformation update-termination-protection \
-            --no-enable-termination-protection \
-            --stack-name "eksctl-${{ env.EKS_CLUSTER_NAME }}-cluster" \
-            --region ${{ env.AWS_REGION }} 2>/dev/null || true
-          aws cloudformation delete-stack \
-            --stack-name "eksctl-${{ env.EKS_CLUSTER_NAME }}-cluster" \
-            --region ${{ env.AWS_REGION }}
-          aws cloudformation wait stack-delete-complete \
-            --stack-name "eksctl-${{ env.EKS_CLUSTER_NAME }}-cluster" \
-            --region ${{ env.AWS_REGION }}
-          echo "✅ Failed stack cleaned up"
-        fi
-
-        # 4. Create IAM roles for EKS (if they don't exist)
-        echo "🔑 Setting up IAM roles for EKS..."
-        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-
-        # Create EKS Cluster Role
+        # EKS Cluster Role
         if aws iam get-role --role-name eksClusterRole > /dev/null 2>&1; then
           echo "✅ eksClusterRole already exists"
         else
           echo "📝 Creating eksClusterRole..."
-          cat > /tmp/eks-trust-policy.json <<'TRUSTEOF'
-        {
-          "Version": "2012-10-17",
-          "Statement": [
-            {
-              "Effect": "Allow",
-              "Principal": {
-                "Service": "eks.amazonaws.com"
-              },
-              "Action": "sts:AssumeRole"
-            }
-          ]
-        }
-        TRUSTEOF
           aws iam create-role \
             --role-name eksClusterRole \
-            --assume-role-policy-document file:///tmp/eks-trust-policy.json
+            --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"eks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
           aws iam attach-role-policy \
             --role-name eksClusterRole \
             --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
-          echo "✅ eksClusterRole created and policy attached"
+          echo "✅ eksClusterRole created"
+          echo "⏳ Waiting for IAM role propagation..."
+          sleep 15
         fi
 
-        # Create Fargate Pod Execution Role
-        if aws iam get-role --role-name AmazonEKSFargatePodExecutionRole > /dev/null 2>&1; then
-          echo "✅ AmazonEKSFargatePodExecutionRole already exists"
+        # EKS Node Role
+        if aws iam get-role --role-name AmazonEKSNodeRole > /dev/null 2>&1; then
+          echo "✅ AmazonEKSNodeRole already exists"
         else
-          echo "📝 Creating AmazonEKSFargatePodExecutionRole..."
-          cat > /tmp/fargate-trust-policy.json <<'TRUSTEOF'
-        {
-          "Version": "2012-10-17",
-          "Statement": [
-            {
-              "Effect": "Allow",
-              "Principal": {
-                "Service": "eks-fargate-pods.amazonaws.com"
-              },
-              "Action": "sts:AssumeRole"
-            }
-          ]
-        }
-        TRUSTEOF
+          echo "📝 Creating AmazonEKSNodeRole..."
           aws iam create-role \
-            --role-name AmazonEKSFargatePodExecutionRole \
-            --assume-role-policy-document file:///tmp/fargate-trust-policy.json
-          aws iam attach-role-policy \
-            --role-name AmazonEKSFargatePodExecutionRole \
-            --policy-arn arn:aws:iam::aws:policy/AmazonEKSFargatePodExecutionRolePolicy
-          aws iam attach-role-policy \
-            --role-name AmazonEKSFargatePodExecutionRole \
+            --role-name AmazonEKSNodeRole \
+            --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+          aws iam attach-role-policy --role-name AmazonEKSNodeRole \
+            --policy-arn arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+          aws iam attach-role-policy --role-name AmazonEKSNodeRole \
+            --policy-arn arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+          aws iam attach-role-policy --role-name AmazonEKSNodeRole \
             --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
-          echo "✅ AmazonEKSFargatePodExecutionRole created and policies attached"
+          aws iam attach-role-policy --role-name AmazonEKSNodeRole \
+            --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+          echo "✅ AmazonEKSNodeRole created"
+        fi
+
+        # Create instance profile for nodes
+        if aws iam get-instance-profile --instance-profile-name AmazonEKSNodeInstanceProfile > /dev/null 2>&1; then
+          echo "✅ Instance profile already exists"
+        else
+          echo "📝 Creating instance profile..."
+          aws iam create-instance-profile --instance-profile-name AmazonEKSNodeInstanceProfile
+          aws iam add-role-to-instance-profile \
+            --instance-profile-name AmazonEKSNodeInstanceProfile \
+            --role-name AmazonEKSNodeRole
+          echo "✅ Instance profile created"
+          echo "⏳ Waiting for instance profile propagation..."
+          sleep 15
         fi
 
         EKS_CLUSTER_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/eksClusterRole"
-        FARGATE_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/AmazonEKSFargatePodExecutionRole"
-        echo "🔑 Cluster Role: $EKS_CLUSTER_ROLE_ARN"
-        echo "🔑 Fargate Role: $FARGATE_ROLE_ARN"
+        EKS_NODE_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/AmazonEKSNodeRole"
 
-        # 5. Create EKS Cluster with Fargate
-        echo "☸️ Creating EKS Cluster with Fargate (this may take 15-20 minutes)..."
-        if eksctl get cluster --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
-          echo "⚠️ EKS cluster already exists: ${{ env.EKS_CLUSTER_NAME }}"
+        # 3. Create VPC and networking
+        echo "🌐 Creating VPC and networking..."
+        VPC_ID=$(aws ec2 describe-vpcs \
+          --filters "Name=tag:Name,Values=eks-${{ env.EKS_CLUSTER_NAME }}-vpc" \
+          --query "Vpcs[0].VpcId" --output text 2>/dev/null)
+
+        if [ "$VPC_ID" != "None" ] && [ -n "$VPC_ID" ]; then
+          echo "⚠️ VPC already exists: $VPC_ID"
         else
-          cat > /tmp/cluster-config.yaml <<EOF
-        apiVersion: eksctl.io/v1alpha5
-        kind: ClusterConfig
-        metadata:
-          name: ${{ env.EKS_CLUSTER_NAME }}
-          region: ${{ env.AWS_REGION }}
-        iam:
-          serviceRoleARN: "${EKS_CLUSTER_ROLE_ARN}"
-        fargateProfiles:
-          - name: fp-default
-            selectors:
-              - namespace: default
-              - namespace: kube-system
-            podExecutionRoleARN: "${FARGATE_ROLE_ARN}"
-          - name: fp-traefik
-            selectors:
-              - namespace: traefik
-            podExecutionRoleARN: "${FARGATE_ROLE_ARN}"
-        EOF
-
-          echo "📋 Cluster config:"
-          cat /tmp/cluster-config.yaml
-
-          eksctl create cluster -f /tmp/cluster-config.yaml --verbose 4 || {
-            echo "❌ Cluster creation failed. Fetching CloudFormation events..."
-            for STACK_SUFFIX in "cluster" "fargate"; do
-              STACK_NAME="eksctl-${{ env.EKS_CLUSTER_NAME }}-${STACK_SUFFIX}"
-              echo ""
-              echo "📋 Events for $STACK_NAME:"
-              aws cloudformation describe-stack-events \
-                --stack-name "$STACK_NAME" \
-                --region ${{ env.AWS_REGION }} \
-                --query "StackEvents[?ResourceStatus=='CREATE_FAILED'].{Resource:LogicalResourceId,Reason:ResourceStatusReason}" \
-                --output table 2>/dev/null || echo "Stack not found: $STACK_NAME"
-            done
-            exit 1
-          }
-          echo "✅ EKS Cluster with Fargate created"
-
-          # Patch CoreDNS to run on Fargate (remove ec2 compute-type annotation)
-          echo "🔧 Patching CoreDNS for Fargate..."
-          aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
-          kubectl patch deployment coredns -n kube-system --type json \
-            -p='[{"op": "remove", "path": "/spec/template/metadata/annotations/eks.amazonaws.com~1compute-type"}]' 2>/dev/null || true
-          kubectl rollout restart deployment coredns -n kube-system
-          echo "⏳ Waiting for CoreDNS to be ready..."
-          kubectl rollout status deployment coredns -n kube-system --timeout=300s
-          echo "✅ CoreDNS running on Fargate"
+          VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 \
+            --query 'Vpc.VpcId' --output text)
+          aws ec2 create-tags --resources $VPC_ID \
+            --tags Key=Name,Value=eks-${{ env.EKS_CLUSTER_NAME }}-vpc
+          aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-support
+          aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames
+          echo "✅ VPC created: $VPC_ID"
         fi
 
-        # 4. Update kubeconfig
+        # Get AZs
+        AZ1=$(aws ec2 describe-availability-zones --region ${{ env.AWS_REGION }} \
+          --query "AvailabilityZones[0].ZoneName" --output text)
+        AZ2=$(aws ec2 describe-availability-zones --region ${{ env.AWS_REGION }} \
+          --query "AvailabilityZones[1].ZoneName" --output text)
+        echo "Using AZs: $AZ1, $AZ2"
+
+        # Public subnets
+        SUBNET_PUB1=$(aws ec2 describe-subnets \
+          --filters "Name=tag:Name,Values=eks-${{ env.EKS_CLUSTER_NAME }}-public-1" \
+          --query "Subnets[0].SubnetId" --output text 2>/dev/null)
+        if [ "$SUBNET_PUB1" == "None" ] || [ -z "$SUBNET_PUB1" ]; then
+          SUBNET_PUB1=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 \
+            --availability-zone $AZ1 --query 'Subnet.SubnetId' --output text)
+          aws ec2 create-tags --resources $SUBNET_PUB1 \
+            --tags Key=Name,Value=eks-${{ env.EKS_CLUSTER_NAME }}-public-1
+          aws ec2 modify-subnet-attribute --subnet-id $SUBNET_PUB1 --map-public-ip-on-launch
+        fi
+
+        SUBNET_PUB2=$(aws ec2 describe-subnets \
+          --filters "Name=tag:Name,Values=eks-${{ env.EKS_CLUSTER_NAME }}-public-2" \
+          --query "Subnets[0].SubnetId" --output text 2>/dev/null)
+        if [ "$SUBNET_PUB2" == "None" ] || [ -z "$SUBNET_PUB2" ]; then
+          SUBNET_PUB2=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.2.0/24 \
+            --availability-zone $AZ2 --query 'Subnet.SubnetId' --output text)
+          aws ec2 create-tags --resources $SUBNET_PUB2 \
+            --tags Key=Name,Value=eks-${{ env.EKS_CLUSTER_NAME }}-public-2
+          aws ec2 modify-subnet-attribute --subnet-id $SUBNET_PUB2 --map-public-ip-on-launch
+        fi
+        echo "✅ Subnets: $SUBNET_PUB1, $SUBNET_PUB2"
+
+        # Internet Gateway
+        IGW_ID=$(aws ec2 describe-internet-gateways \
+          --filters "Name=tag:Name,Values=eks-${{ env.EKS_CLUSTER_NAME }}-igw" \
+          --query "InternetGateways[0].InternetGatewayId" --output text 2>/dev/null)
+        if [ "$IGW_ID" == "None" ] || [ -z "$IGW_ID" ]; then
+          IGW_ID=$(aws ec2 create-internet-gateway --query 'InternetGateway.InternetGatewayId' --output text)
+          aws ec2 create-tags --resources $IGW_ID \
+            --tags Key=Name,Value=eks-${{ env.EKS_CLUSTER_NAME }}-igw
+          aws ec2 attach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
+        fi
+        echo "✅ Internet Gateway: $IGW_ID"
+
+        # Route table
+        RTB_ID=$(aws ec2 describe-route-tables \
+          --filters "Name=tag:Name,Values=eks-${{ env.EKS_CLUSTER_NAME }}-public-rt" \
+          --query "RouteTables[0].RouteTableId" --output text 2>/dev/null)
+        if [ "$RTB_ID" == "None" ] || [ -z "$RTB_ID" ]; then
+          RTB_ID=$(aws ec2 create-route-table --vpc-id $VPC_ID \
+            --query 'RouteTable.RouteTableId' --output text)
+          aws ec2 create-tags --resources $RTB_ID \
+            --tags Key=Name,Value=eks-${{ env.EKS_CLUSTER_NAME }}-public-rt
+          aws ec2 create-route --route-table-id $RTB_ID \
+            --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID
+          aws ec2 associate-route-table --route-table-id $RTB_ID --subnet-id $SUBNET_PUB1
+          aws ec2 associate-route-table --route-table-id $RTB_ID --subnet-id $SUBNET_PUB2
+        fi
+        echo "✅ Route table: $RTB_ID"
+
+        # Security group for cluster
+        CLUSTER_SG=$(aws ec2 describe-security-groups \
+          --filters "Name=tag:Name,Values=eks-${{ env.EKS_CLUSTER_NAME }}-cluster-sg" "Name=vpc-id,Values=$VPC_ID" \
+          --query "SecurityGroups[0].GroupId" --output text 2>/dev/null)
+        if [ "$CLUSTER_SG" == "None" ] || [ -z "$CLUSTER_SG" ]; then
+          CLUSTER_SG=$(aws ec2 create-security-group \
+            --group-name eks-${{ env.EKS_CLUSTER_NAME }}-cluster-sg \
+            --description "EKS Cluster SG" \
+            --vpc-id $VPC_ID --query 'GroupId' --output text)
+          aws ec2 create-tags --resources $CLUSTER_SG \
+            --tags Key=Name,Value=eks-${{ env.EKS_CLUSTER_NAME }}-cluster-sg
+        fi
+        echo "✅ Cluster SG: $CLUSTER_SG"
+
+        # Security group for nodes
+        NODE_SG=$(aws ec2 describe-security-groups \
+          --filters "Name=tag:Name,Values=eks-${{ env.EKS_CLUSTER_NAME }}-node-sg" "Name=vpc-id,Values=$VPC_ID" \
+          --query "SecurityGroups[0].GroupId" --output text 2>/dev/null)
+        if [ "$NODE_SG" == "None" ] || [ -z "$NODE_SG" ]; then
+          NODE_SG=$(aws ec2 create-security-group \
+            --group-name eks-${{ env.EKS_CLUSTER_NAME }}-node-sg \
+            --description "EKS Node SG" \
+            --vpc-id $VPC_ID --query 'GroupId' --output text)
+          aws ec2 create-tags --resources $NODE_SG \
+            --tags Key=Name,Value=eks-${{ env.EKS_CLUSTER_NAME }}-node-sg
+
+          # Node <-> Node communication
+          aws ec2 authorize-security-group-ingress --group-id $NODE_SG \
+            --protocol all --source-group $NODE_SG
+          # Cluster -> Node
+          aws ec2 authorize-security-group-ingress --group-id $NODE_SG \
+            --protocol tcp --port 1025-65535 --source-group $CLUSTER_SG
+          aws ec2 authorize-security-group-ingress --group-id $NODE_SG \
+            --protocol tcp --port 443 --source-group $CLUSTER_SG
+          # Node -> Cluster
+          aws ec2 authorize-security-group-ingress --group-id $CLUSTER_SG \
+            --protocol tcp --port 443 --source-group $NODE_SG
+          # Node -> Internet (for pulling images)
+          aws ec2 authorize-security-group-egress --group-id $NODE_SG \
+            --protocol all --cidr 0.0.0.0/0 2>/dev/null || true
+        fi
+        echo "✅ Node SG: $NODE_SG"
+
+        # 4. Create EKS Cluster
+        echo "☸️ Creating EKS Cluster (this may take 10-15 minutes)..."
+        CLUSTER_STATUS=$(aws eks describe-cluster --name ${{ env.EKS_CLUSTER_NAME }} \
+          --query "cluster.status" --output text 2>/dev/null || echo "NOT_FOUND")
+
+        if [ "$CLUSTER_STATUS" == "ACTIVE" ]; then
+          echo "⚠️ EKS cluster already exists and is ACTIVE"
+        elif [ "$CLUSTER_STATUS" == "CREATING" ]; then
+          echo "⏳ Cluster is still creating, waiting..."
+          aws eks wait cluster-active --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+          echo "✅ Cluster is now ACTIVE"
+        else
+          echo "Creating cluster with role: $EKS_CLUSTER_ROLE_ARN"
+          aws eks create-cluster \
+            --name ${{ env.EKS_CLUSTER_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --role-arn "$EKS_CLUSTER_ROLE_ARN" \
+            --resources-vpc-config "subnetIds=$SUBNET_PUB1,$SUBNET_PUB2,securityGroupIds=$CLUSTER_SG,endpointPublicAccess=true,endpointPrivateAccess=false"
+
+          echo "⏳ Waiting for cluster to become ACTIVE..."
+          aws eks wait cluster-active --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+          echo "✅ EKS Cluster is ACTIVE"
+        fi
+
+        # 5. Update kubeconfig
         echo "🔑 Updating kubeconfig..."
         aws eks update-kubeconfig \
           --name ${{ env.EKS_CLUSTER_NAME }} \
           --region ${{ env.AWS_REGION }}
 
-        # 5. Configure ECR access via K8s secret
+        # 6. Launch worker node (self-managed via EC2)
+        echo "🖥️ Launching worker node..."
+        EXISTING_NODE=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=eks-${{ env.EKS_CLUSTER_NAME }}-node" \
+                    "Name=instance-state-name,Values=running,pending" \
+          --query "Reservations[0].Instances[0].InstanceId" --output text 2>/dev/null)
+
+        if [ "$EXISTING_NODE" != "None" ] && [ -n "$EXISTING_NODE" ]; then
+          echo "⚠️ Worker node already exists: $EXISTING_NODE"
+        else
+          # Get EKS optimized AMI
+          EKS_VERSION=$(aws eks describe-cluster --name ${{ env.EKS_CLUSTER_NAME }} \
+            --query "cluster.version" --output text)
+          EKS_AMI=$(aws ssm get-parameter \
+            --name "/aws/service/eks/optimized-ami/${EKS_VERSION}/amazon-linux-2023/x86_64/standard/recommended/image_id" \
+            --query "Parameter.Value" --output text)
+          echo "Using AMI: $EKS_AMI (EKS ${EKS_VERSION})"
+
+          # Get cluster details for bootstrap
+          CLUSTER_ENDPOINT=$(aws eks describe-cluster --name ${{ env.EKS_CLUSTER_NAME }} \
+            --query "cluster.endpoint" --output text)
+          CLUSTER_CA=$(aws eks describe-cluster --name ${{ env.EKS_CLUSTER_NAME }} \
+            --query "cluster.certificateAuthority.data" --output text)
+          CLUSTER_CIDR=$(aws eks describe-cluster --name ${{ env.EKS_CLUSTER_NAME }} \
+            --query "cluster.kubernetesNetworkConfig.serviceIpv4Cidr" --output text)
+
+          # Create userdata for node bootstrap
+          cat > /tmp/userdata.txt <<USERDATA
+        MIME-Version: 1.0
+        Content-Type: multipart/mixed; boundary="BOUNDARY"
+
+        --BOUNDARY
+        Content-Type: application/node.eks.aws
+
+        ---
+        apiVersion: node.eks.aws/v1alpha1
+        kind: NodeConfig
+        spec:
+          cluster:
+            name: ${{ env.EKS_CLUSTER_NAME }}
+            apiServerEndpoint: ${CLUSTER_ENDPOINT}
+            certificateAuthority: ${CLUSTER_CA}
+            cidr: ${CLUSTER_CIDR}
+
+        --BOUNDARY--
+        USERDATA
+
+          USERDATA_B64=$(base64 -w 0 /tmp/userdata.txt)
+
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id $EKS_AMI \
+            --instance-type t3.small \
+            --subnet-id $SUBNET_PUB1 \
+            --security-group-ids $NODE_SG \
+            --iam-instance-profile Name=AmazonEKSNodeInstanceProfile \
+            --user-data "$USERDATA_B64" \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=eks-${{ env.EKS_CLUSTER_NAME }}-node},{Key=kubernetes.io/cluster/${{ env.EKS_CLUSTER_NAME }},Value=owned}]" \
+            --query 'Instances[0].InstanceId' --output text)
+          echo "✅ Node launched: $INSTANCE_ID"
+
+          echo "⏳ Waiting for node to be running..."
+          aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+          echo "✅ Node is running"
+        fi
+
+        # 7. Create access entry for the node role
+        echo "🔐 Configuring node access to cluster..."
+        aws eks create-access-entry \
+          --cluster-name ${{ env.EKS_CLUSTER_NAME }} \
+          --principal-arn "$EKS_NODE_ROLE_ARN" \
+          --type EC2_LINUX 2>/dev/null || echo "Access entry may already exist"
+
+        # Also add via aws-auth ConfigMap (fallback for older auth modes)
+        cat > /tmp/aws-auth-patch.yaml <<AUTHEOF
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: aws-auth
+          namespace: kube-system
+        data:
+          mapRoles: |
+            - rolearn: ${EKS_NODE_ROLE_ARN}
+              username: system:node:{{EC2PrivateDNSName}}
+              groups:
+                - system:bootstrappers
+                - system:nodes
+        AUTHEOF
+        kubectl apply -f /tmp/aws-auth-patch.yaml 2>/dev/null || true
+
+        echo "⏳ Waiting for node to join cluster (up to 5 min)..."
+        for i in $(seq 1 30); do
+          NODE_COUNT=$(kubectl get nodes --no-headers 2>/dev/null | wc -l)
+          if [ "$NODE_COUNT" -ge 1 ]; then
+            echo "✅ Node joined the cluster!"
+            kubectl get nodes
+            break
+          fi
+          echo "  Waiting... ($i/30)"
+          sleep 10
+        done
+
+        if [ "$NODE_COUNT" -lt 1 ]; then
+          echo "⚠️ Node hasn't joined yet. Check EC2 instance logs."
+          echo "Continuing anyway - node may join later."
+        fi
+
+        # 8. Configure ECR access
         echo "🔗 Configuring ECR access..."
         ECR_PASSWORD=$(aws ecr get-login-password --region ${{ env.AWS_REGION }})
-        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
         ECR_SERVER="${AWS_ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
-
         kubectl create secret docker-registry registry-secret \
           --docker-server=$ECR_SERVER \
           --docker-username=AWS \
           --docker-password=$ECR_PASSWORD \
           --docker-email=noreply@example.com \
           --dry-run=client -o yaml | kubectl apply -f -
+        echo "✅ ECR access configured"
 
-        echo "✅ ECR access configured via Kubernetes secret"
-
-        # 6. Install Traefik Ingress Controller via Helm (Fargate compatible)
+        # 9. Install Traefik Ingress Controller
         echo "🌐 Installing Traefik Ingress Controller..."
         if kubectl get namespace traefik > /dev/null 2>&1; then
-          echo "✅ Traefik Ingress Controller already installed"
+          echo "✅ Traefik already installed"
         else
-          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
           helm repo add traefik https://traefik.github.io/charts
           helm repo update
           helm install traefik traefik/traefik \
             --namespace traefik \
             --create-namespace \
-            --set service.type=LoadBalancer \
-            --set service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"=nlb \
-            --set deployment.kind=Deployment \
-            --set hostNetwork=false
-
-          echo "⏳ Waiting for Traefik Ingress Controller (Fargate pods take longer)..."
+            --set service.type=LoadBalancer
+          echo "⏳ Waiting for Traefik..."
           kubectl wait --namespace traefik \
             --for=condition=ready pod \
             --selector=app.kubernetes.io/name=traefik \
-            --timeout=600s
+            --timeout=300s
         fi
 
         echo ""
@@ -574,53 +718,110 @@ jobs:
         aws-region: ${{ env.AWS_REGION }}
 
     - name: Destroy AWS Infrastructure
+      timeout-minutes: 20
       run: |
-        echo "=== DESTROYING AWS INFRASTRUCTURE ==="
+        echo "=== DESTROYING AWS INFRASTRUCTURE (Pure CLI) ==="
         echo ""
-        echo "⚠️ This will delete EKS and ECR resources"
+        echo "⚠️ This will delete ALL EKS, EC2, VPC, and ECR resources"
         echo ""
 
-        # Install eksctl
-        echo "📦 Installing eksctl..."
-        curl --silent --location \
-          "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" \
-          | tar xz -C /tmp
-        sudo mv /tmp/eksctl /usr/local/bin
+        # 1. Terminate EC2 worker nodes
+        echo "🗑️ Terminating worker nodes..."
+        NODE_IDS=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=eks-${{ env.EKS_CLUSTER_NAME }}-node" \
+                    "Name=instance-state-name,Values=running,pending,stopping,stopped" \
+          --query "Reservations[].Instances[].InstanceId" --output text 2>/dev/null)
+        if [ -n "$NODE_IDS" ] && [ "$NODE_IDS" != "None" ]; then
+          aws ec2 terminate-instances --instance-ids $NODE_IDS
+          echo "⏳ Waiting for instances to terminate..."
+          aws ec2 wait instance-terminated --instance-ids $NODE_IDS
+          echo "✅ Nodes terminated"
+        else
+          echo "- No worker nodes found"
+        fi
 
-        # Cleanup any failed CloudFormation stacks
+        # 2. Cleanup leftover CloudFormation stacks from previous eksctl runs
         echo "🧹 Checking for leftover CloudFormation stacks..."
         for STACK_SUFFIX in "cluster" "nodegroup-ng-edteam"; do
           STACK_NAME="eksctl-${{ env.EKS_CLUSTER_NAME }}-${STACK_SUFFIX}"
           STACK_STATUS=$(aws cloudformation describe-stacks \
             --stack-name "$STACK_NAME" \
-            --region ${{ env.AWS_REGION }} \
             --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NOT_FOUND")
-
-          if [[ "$STACK_STATUS" == *"ROLLBACK"* ]] || [[ "$STACK_STATUS" == *"FAILED"* ]]; then
-            echo "🗑️ Deleting failed stack: $STACK_NAME (status: $STACK_STATUS)..."
+          if [ "$STACK_STATUS" != "NOT_FOUND" ]; then
+            echo "🗑️ Deleting stack: $STACK_NAME (status: $STACK_STATUS)..."
             aws cloudformation update-termination-protection \
               --no-enable-termination-protection \
-              --stack-name "$STACK_NAME" \
-              --region ${{ env.AWS_REGION }} 2>/dev/null || true
-            aws cloudformation delete-stack --stack-name "$STACK_NAME" --region ${{ env.AWS_REGION }}
-            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region ${{ env.AWS_REGION }}
-            echo "✅ Failed stack cleaned up: $STACK_NAME"
+              --stack-name "$STACK_NAME" 2>/dev/null || true
+            aws cloudformation delete-stack --stack-name "$STACK_NAME"
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" 2>/dev/null || true
+            echo "✅ Stack cleaned up: $STACK_NAME"
           fi
         done
 
-        # Delete EKS Cluster
-        if eksctl get cluster --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
+        # 3. Delete EKS Cluster
+        CLUSTER_STATUS=$(aws eks describe-cluster --name ${{ env.EKS_CLUSTER_NAME }} \
+          --query "cluster.status" --output text 2>/dev/null || echo "NOT_FOUND")
+        if [ "$CLUSTER_STATUS" != "NOT_FOUND" ]; then
           echo "🗑️ Deleting EKS Cluster: ${{ env.EKS_CLUSTER_NAME }}..."
-          eksctl delete cluster \
-            --name ${{ env.EKS_CLUSTER_NAME }} \
-            --region ${{ env.AWS_REGION }} \
-            --wait
+          aws eks delete-cluster --name ${{ env.EKS_CLUSTER_NAME }}
+          echo "⏳ Waiting for cluster deletion..."
+          aws eks wait cluster-deleted --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
           echo "✅ EKS cluster deleted"
         else
           echo "- EKS Cluster: Not found"
         fi
 
-        # Delete ECR Repository
+        # 4. Delete VPC and networking
+        echo "🗑️ Cleaning up VPC and networking..."
+        VPC_ID=$(aws ec2 describe-vpcs \
+          --filters "Name=tag:Name,Values=eks-${{ env.EKS_CLUSTER_NAME }}-vpc" \
+          --query "Vpcs[0].VpcId" --output text 2>/dev/null)
+
+        if [ "$VPC_ID" != "None" ] && [ -n "$VPC_ID" ]; then
+          # Delete security groups (non-default)
+          for SG_ID in $(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC_ID" \
+            --query "SecurityGroups[?GroupName!='default'].GroupId" --output text); do
+            echo "  Deleting SG: $SG_ID"
+            aws ec2 delete-security-group --group-id $SG_ID 2>/dev/null || true
+          done
+
+          # Delete subnets
+          for SUBNET_ID in $(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" \
+            --query "Subnets[].SubnetId" --output text); do
+            echo "  Deleting subnet: $SUBNET_ID"
+            aws ec2 delete-subnet --subnet-id $SUBNET_ID 2>/dev/null || true
+          done
+
+          # Detach and delete internet gateways
+          for IGW_ID in $(aws ec2 describe-internet-gateways \
+            --filters "Name=attachment.vpc-id,Values=$VPC_ID" \
+            --query "InternetGateways[].InternetGatewayId" --output text); do
+            echo "  Detaching and deleting IGW: $IGW_ID"
+            aws ec2 detach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
+            aws ec2 delete-internet-gateway --internet-gateway-id $IGW_ID
+          done
+
+          # Delete route tables (non-main)
+          for RTB_ID in $(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" \
+            --query "RouteTables[?Associations[0].Main!=\`true\`].RouteTableId" --output text); do
+            # Disassociate first
+            for ASSOC_ID in $(aws ec2 describe-route-tables --route-table-id $RTB_ID \
+              --query "RouteTables[0].Associations[?!Main].RouteTableAssociationId" --output text); do
+              aws ec2 disassociate-route-table --association-id $ASSOC_ID 2>/dev/null || true
+            done
+            echo "  Deleting route table: $RTB_ID"
+            aws ec2 delete-route-table --route-table-id $RTB_ID 2>/dev/null || true
+          done
+
+          # Delete VPC
+          echo "  Deleting VPC: $VPC_ID"
+          aws ec2 delete-vpc --vpc-id $VPC_ID
+          echo "✅ VPC and networking deleted"
+        else
+          echo "- VPC: Not found"
+        fi
+
+        # 5. Delete ECR Repository
         if aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY_NAME }} --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
           echo "🗑️ Deleting ECR Repository: ${{ env.ECR_REPOSITORY_NAME }}..."
           aws ecr delete-repository \
@@ -632,18 +833,24 @@ jobs:
           echo "- ECR Repository: Not found"
         fi
 
-        # Delete IAM roles
+        # 6. Delete IAM roles and instance profiles
         echo "🗑️ Cleaning up IAM roles..."
-        for ROLE_NAME in AmazonEKSFargatePodExecutionRole eksClusterRole; do
+        # Instance profile first
+        if aws iam get-instance-profile --instance-profile-name AmazonEKSNodeInstanceProfile > /dev/null 2>&1; then
+          aws iam remove-role-from-instance-profile \
+            --instance-profile-name AmazonEKSNodeInstanceProfile \
+            --role-name AmazonEKSNodeRole 2>/dev/null || true
+          aws iam delete-instance-profile --instance-profile-name AmazonEKSNodeInstanceProfile
+          echo "✅ Instance profile deleted"
+        fi
+
+        for ROLE_NAME in AmazonEKSNodeRole eksClusterRole; do
           if aws iam get-role --role-name $ROLE_NAME > /dev/null 2>&1; then
-            echo "Detaching policies from $ROLE_NAME..."
-            POLICIES=$(aws iam list-attached-role-policies --role-name $ROLE_NAME --query "AttachedPolicies[].PolicyArn" --output text)
+            echo "  Cleaning up $ROLE_NAME..."
+            POLICIES=$(aws iam list-attached-role-policies --role-name $ROLE_NAME \
+              --query "AttachedPolicies[].PolicyArn" --output text)
             for POLICY_ARN in $POLICIES; do
               aws iam detach-role-policy --role-name $ROLE_NAME --policy-arn $POLICY_ARN
-            done
-            PROFILES=$(aws iam list-instance-profiles-for-role --role-name $ROLE_NAME --query "InstanceProfiles[].InstanceProfileName" --output text)
-            for PROFILE in $PROFILES; do
-              aws iam remove-role-from-instance-profile --instance-profile-name $PROFILE --role-name $ROLE_NAME
             done
             aws iam delete-role --role-name $ROLE_NAME
             echo "✅ $ROLE_NAME deleted"
