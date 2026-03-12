@@ -367,7 +367,41 @@ jobs:
 
           echo "📋 Cluster config:"
           cat /tmp/cluster-config.yaml
-          eksctl create cluster -f /tmp/cluster-config.yaml
+
+          # Verify IAM roles exist before creating cluster
+          echo "🔍 Verifying IAM roles..."
+          if aws iam get-role --role-name eksClusterRole > /dev/null 2>&1; then
+            echo "✅ eksClusterRole exists"
+          else
+            echo "❌ eksClusterRole NOT FOUND - please create it first"
+            exit 1
+          fi
+
+          if aws iam get-role --role-name AmazonEKSNodeRole > /dev/null 2>&1; then
+            echo "✅ AmazonEKSNodeRole exists"
+            echo "📋 Attached policies:"
+            aws iam list-attached-role-policies --role-name AmazonEKSNodeRole --output table
+            echo "📋 Instance profiles:"
+            aws iam list-instance-profiles-for-role --role-name AmazonEKSNodeRole --output table
+          else
+            echo "❌ AmazonEKSNodeRole NOT FOUND - please create it first"
+            exit 1
+          fi
+
+          eksctl create cluster -f /tmp/cluster-config.yaml --verbose 4 || {
+            echo "❌ Cluster creation failed. Fetching CloudFormation events..."
+            for STACK_SUFFIX in "cluster" "nodegroup-ng-edteam"; do
+              STACK_NAME="eksctl-${{ env.EKS_CLUSTER_NAME }}-${STACK_SUFFIX}"
+              echo ""
+              echo "📋 Events for $STACK_NAME:"
+              aws cloudformation describe-stack-events \
+                --stack-name "$STACK_NAME" \
+                --region ${{ env.AWS_REGION }} \
+                --query "StackEvents[?ResourceStatus=='CREATE_FAILED'].{Resource:LogicalResourceId,Reason:ResourceStatusReason}" \
+                --output table 2>/dev/null || echo "Stack not found: $STACK_NAME"
+            done
+            exit 1
+          }
           echo "✅ EKS Cluster created"
         fi
 
