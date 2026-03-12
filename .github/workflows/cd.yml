@@ -83,6 +83,12 @@ jobs:
       if: env.CLOUD_PROVIDER == 'aws'
       uses: aws-actions/amazon-ecr-login@v2
 
+    - name: Ensure ECR repository exists
+      if: env.CLOUD_PROVIDER == 'aws'
+      run: |
+        aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY_NAME }} --region ${{ env.AWS_REGION }} 2>/dev/null || \
+        aws ecr create-repository --repository-name ${{ env.ECR_REPOSITORY_NAME }} --region ${{ env.AWS_REGION }}
+
     - name: Build and push to ECR
       if: env.CLOUD_PROVIDER == 'aws'
       run: |
