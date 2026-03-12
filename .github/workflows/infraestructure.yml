@@ -340,44 +340,82 @@ jobs:
           echo "✅ Failed stack cleaned up"
         fi
 
-        # 4. Create EKS Cluster (using lab pre-existing IAM roles)
+        # 4. Create IAM roles for EKS (if they don't exist)
+        echo "🔑 Setting up IAM roles for EKS..."
+        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+        # Create EKS Cluster Role
+        if aws iam get-role --role-name eksClusterRole > /dev/null 2>&1; then
+          echo "✅ eksClusterRole already exists"
+        else
+          echo "📝 Creating eksClusterRole..."
+          cat > /tmp/eks-trust-policy.json <<'TRUSTEOF'
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "eks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        }
+        TRUSTEOF
+          aws iam create-role \
+            --role-name eksClusterRole \
+            --assume-role-policy-document file:///tmp/eks-trust-policy.json
+          aws iam attach-role-policy \
+            --role-name eksClusterRole \
+            --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+          echo "✅ eksClusterRole created and policy attached"
+        fi
+
+        # Create EKS Node Role
+        if aws iam get-role --role-name AmazonEKSNodeRole > /dev/null 2>&1; then
+          echo "✅ AmazonEKSNodeRole already exists"
+        else
+          echo "📝 Creating AmazonEKSNodeRole..."
+          cat > /tmp/ec2-trust-policy.json <<'TRUSTEOF'
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ec2.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        }
+        TRUSTEOF
+          aws iam create-role \
+            --role-name AmazonEKSNodeRole \
+            --assume-role-policy-document file:///tmp/ec2-trust-policy.json
+          aws iam attach-role-policy \
+            --role-name AmazonEKSNodeRole \
+            --policy-arn arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+          aws iam attach-role-policy \
+            --role-name AmazonEKSNodeRole \
+            --policy-arn arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+          aws iam attach-role-policy \
+            --role-name AmazonEKSNodeRole \
+            --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+          echo "✅ AmazonEKSNodeRole created and policies attached"
+        fi
+
+        EKS_CLUSTER_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/eksClusterRole"
+        EKS_NODE_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/AmazonEKSNodeRole"
+        echo "🔑 Cluster Role: $EKS_CLUSTER_ROLE_ARN"
+        echo "🔑 Node Role: $EKS_NODE_ROLE_ARN"
+
+        # 5. Create EKS Cluster
         echo "☸️ Creating EKS Cluster (this may take 15-20 minutes)..."
         if eksctl get cluster --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
           echo "⚠️ EKS cluster already exists: ${{ env.EKS_CLUSTER_NAME }}"
         else
-          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-
-          # Discover available EKS-related IAM roles
-          echo "🔍 Discovering available IAM roles for EKS..."
-          echo "📋 All available roles:"
-          aws iam list-roles --query "Roles[].{RoleName:RoleName,Arn:Arn}" --output table
-
-          # Find cluster service role (trust policy for eks.amazonaws.com)
-          EKS_CLUSTER_ROLE=$(aws iam list-roles \
-            --query "Roles[?contains(AssumeRolePolicyDocument.Statement[0].Principal.Service,'eks.amazonaws.com')].Arn | [0]" \
-            --output text 2>/dev/null || echo "")
-
-          # Find node role (trust policy for ec2.amazonaws.com with EKS-related name)
-          EKS_NODE_ROLE=$(aws iam list-roles \
-            --query "Roles[?contains(AssumeRolePolicyDocument.Statement[0].Principal.Service,'ec2.amazonaws.com') && (contains(RoleName,'Node') || contains(RoleName,'node') || contains(RoleName,'EKS') || contains(RoleName,'eks'))].Arn | [0]" \
-            --output text 2>/dev/null || echo "")
-
-          echo ""
-          echo "🔑 Detected EKS Cluster Role: ${EKS_CLUSTER_ROLE:-NOT FOUND}"
-          echo "🔑 Detected EKS Node Role: ${EKS_NODE_ROLE:-NOT FOUND}"
-
-          if [ -z "$EKS_CLUSTER_ROLE" ] || [ "$EKS_CLUSTER_ROLE" == "None" ]; then
-            echo "❌ No EKS cluster service role found. Cannot create cluster without iam:PassRole permission."
-            echo "💡 Please create a role with EKS trust policy or grant iam:PassRole permission."
-            exit 1
-          fi
-
-          if [ -z "$EKS_NODE_ROLE" ] || [ "$EKS_NODE_ROLE" == "None" ]; then
-            echo "❌ No EKS node role found. Cannot create nodegroup."
-            echo "💡 Please create a role with EC2 trust policy and EKS node policies."
-            exit 1
-          fi
-
           cat > /tmp/cluster-config.yaml <<EOF
         apiVersion: eksctl.io/v1alpha5
         kind: ClusterConfig
@@ -385,7 +423,7 @@ jobs:
           name: ${{ env.EKS_CLUSTER_NAME }}
           region: ${{ env.AWS_REGION }}
         iam:
-          serviceRoleARN: "${EKS_CLUSTER_ROLE}"
+          serviceRoleARN: "${EKS_CLUSTER_ROLE_ARN}"
         managedNodeGroups:
           - name: ng-edteam
             instanceType: t3.small
@@ -393,7 +431,7 @@ jobs:
             minSize: 1
             maxSize: 2
             iam:
-              instanceRoleARN: "${EKS_NODE_ROLE}"
+              instanceRoleARN: "${EKS_NODE_ROLE_ARN}"
         EOF
 
           echo "📋 Cluster config:"
@@ -581,6 +619,24 @@ jobs:
         else
           echo "- ECR Repository: Not found"
         fi
+
+        # Delete IAM roles
+        echo "🗑️ Cleaning up IAM roles..."
+        for ROLE_NAME in AmazonEKSNodeRole eksClusterRole; do
+          if aws iam get-role --role-name $ROLE_NAME > /dev/null 2>&1; then
+            echo "Detaching policies from $ROLE_NAME..."
+            POLICIES=$(aws iam list-attached-role-policies --role-name $ROLE_NAME --query "AttachedPolicies[].PolicyArn" --output text)
+            for POLICY_ARN in $POLICIES; do
+              aws iam detach-role-policy --role-name $ROLE_NAME --policy-arn $POLICY_ARN
+            done
+            PROFILES=$(aws iam list-instance-profiles-for-role --role-name $ROLE_NAME --query "InstanceProfiles[].InstanceProfileName" --output text)
+            for PROFILE in $PROFILES; do
+              aws iam remove-role-from-instance-profile --instance-profile-name $PROFILE --role-name $ROLE_NAME
+            done
+            aws iam delete-role --role-name $ROLE_NAME
+            echo "✅ $ROLE_NAME deleted"
+          fi
+        done
 
         echo ""
         echo "✅ AWS cleanup completed"
