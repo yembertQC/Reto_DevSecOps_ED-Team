@@ -397,7 +397,9 @@ jobs:
           SUBNET_PUB1=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 \
             --availability-zone $AZ1 --query 'Subnet.SubnetId' --output text)
           aws ec2 create-tags --resources $SUBNET_PUB1 \
-            --tags Key=Name,Value=eks-${{ env.EKS_CLUSTER_NAME }}-public-1
+            --tags Key=Name,Value=eks-${{ env.EKS_CLUSTER_NAME }}-public-1 \
+                   Key=kubernetes.io/role/elb,Value=1 \
+                   Key=kubernetes.io/cluster/${{ env.EKS_CLUSTER_NAME }},Value=shared
           aws ec2 modify-subnet-attribute --subnet-id $SUBNET_PUB1 --map-public-ip-on-launch
         fi
 
@@ -408,7 +410,9 @@ jobs:
           SUBNET_PUB2=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.2.0/24 \
             --availability-zone $AZ2 --query 'Subnet.SubnetId' --output text)
           aws ec2 create-tags --resources $SUBNET_PUB2 \
-            --tags Key=Name,Value=eks-${{ env.EKS_CLUSTER_NAME }}-public-2
+            --tags Key=Name,Value=eks-${{ env.EKS_CLUSTER_NAME }}-public-2 \
+                   Key=kubernetes.io/role/elb,Value=1 \
+                   Key=kubernetes.io/cluster/${{ env.EKS_CLUSTER_NAME }},Value=shared
           aws ec2 modify-subnet-attribute --subnet-id $SUBNET_PUB2 --map-public-ip-on-launch
         fi
         echo "✅ Subnets: $SUBNET_PUB1, $SUBNET_PUB2"
@@ -478,6 +482,11 @@ jobs:
           # Node -> Cluster
           aws ec2 authorize-security-group-ingress --group-id $CLUSTER_SG \
             --protocol tcp --port 443 --source-group $NODE_SG
+          # HTTP/HTTPS public access (for LoadBalancer)
+          aws ec2 authorize-security-group-ingress --group-id $NODE_SG \
+            --protocol tcp --port 80 --cidr 0.0.0.0/0
+          aws ec2 authorize-security-group-ingress --group-id $NODE_SG \
+            --protocol tcp --port 443 --cidr 0.0.0.0/0
           # Node -> Internet (for pulling images)
           aws ec2 authorize-security-group-egress --group-id $NODE_SG \
             --protocol all --cidr 0.0.0.0/0 2>/dev/null || true
@@ -634,22 +643,18 @@ jobs:
 
         # 9. Install Traefik Ingress Controller
         echo "🌐 Installing Traefik Ingress Controller..."
-        if kubectl get namespace traefik > /dev/null 2>&1; then
-          echo "✅ Traefik already installed"
-        else
-          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-          helm repo add traefik https://traefik.github.io/charts
-          helm repo update
-          helm install traefik traefik/traefik \
-            --namespace traefik \
-            --create-namespace \
-            --set service.type=LoadBalancer
-          echo "⏳ Waiting for Traefik..."
-          kubectl wait --namespace traefik \
-            --for=condition=ready pod \
-            --selector=app.kubernetes.io/name=traefik \
-            --timeout=300s
-        fi
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+        helm repo add traefik https://traefik.github.io/charts
+        helm repo update
+        helm upgrade --install traefik traefik/traefik \
+          --namespace traefik \
+          --create-namespace \
+          --set service.type=LoadBalancer
+        echo "⏳ Waiting for Traefik..."
+        kubectl wait --namespace traefik \
+          --for=condition=ready pod \
+          --selector=app.kubernetes.io/name=traefik \
+          --timeout=300s
 
         echo ""
         echo "=== AWS INFRASTRUCTURE CREATED SUCCESSFULLY ==="
