@@ -1,10 +1,12 @@
 # Reto DevSecOps - ED Team
 
-APIs en Flask (Python) y Go con pipeline DevSecOps completo, despliegue automatizado en Kubernetes (Azure AKS o AWS EKS) y escaneo de seguridad integrado.
+Dos APIs (Python Flask y Go) con pipeline DevSecOps completo sobre GitHub Actions: análisis de seguridad estático y de contenedor, despliegue automatizado en Kubernetes y soporte multi-cloud (Azure AKS / AWS EKS).
 
-## ¿Qué hace?
+> Para diagramas de arquitectura e infraestructura ver [ARCHITECTURE.md](ARCHITECTURE.md).
 
-Dos APIs con los mismos endpoints:
+## APIs
+
+Ambas APIs exponen los mismos endpoints:
 
 | Endpoint | Respuesta |
 |----------|-----------|
@@ -13,158 +15,202 @@ Dos APIs con los mismos endpoints:
 
 | App | Lenguaje | Puerto | Directorio |
 |-----|----------|--------|------------|
-| Python (Flask) | Python 3.13 | 5000 | `src/` |
-| Go | Go 1.23 | 8080 | `src-go/` |
+| Python (Flask + Gunicorn) | Python 3.13 | 5000 | `src/` |
+| Go (net/http) | Go 1.23 | 8080 | `src-go/` |
 
 ## Estructura del proyecto
 
 ```
-src/
-  app.py              # Aplicación Flask (Python)
-  Dockerfile          # Imagen Docker (Python 3.13 + Gunicorn)
-  requirements.txt    # Dependencias (Flask, Gunicorn)
-src-go/
-  main.go             # Aplicación Go
-  main_test.go        # Tests unitarios
-  go.mod              # Módulo Go
-  Dockerfile          # Imagen Docker (Go 1.23, multi-stage)
-k8s/
-  deployment.yml      # Deployment con 2 réplicas, probes y security context
-  service.yml         # Service ClusterIP (puerto 80 → 5000)
-  ingress.yml         # Ingress con Traefik
-  hpa.yml             # Autoescalado (2-10 pods, CPU 70% / RAM 80%)
 .github/workflows/
-  ci.yml              # Pipeline CI Python (SAST, SCA, escaneo de imagen)
-  ci-go.yml           # Pipeline CI Go (tests, SAST, SCA, escaneo de imagen)
-  cd.yml              # Pipeline CD (build, release, deploy)
-  infraestructure.yml # Provisión de infraestructura (AKS/EKS)
+  ci.yml                  # CI Python — SAST, SCA, escaneo de imagen
+  ci-go.yml               # CI Go — tests, SAST, SCA, escaneo de imagen
+  cd.yml                  # CD Python — build, release, deploy (un cloud)
+  cd-go.yml               # CD Go — build, release, deploy (un cloud)
+  cd-go-multicloud.yml    # CD Go Multi-Cloud — build único → ACR + ECR en paralelo (manual)
+  infraestructure.yml     # Infraestructura — provisión por cloud (manual)
+  infra-multicloud.yml    # Infraestructura Multi-Cloud — dispara Azure + AWS a la vez (manual)
+doc/
+  azure-credentials-example.json   # Ejemplo del secret AZURE_CREDENTIALS
+  azure-variables-example.json     # Ejemplo de variables para Azure
+  aws-variables-example.json       # Ejemplo de variables para AWS
+src/
+  app.py                  # Aplicación Flask
+  Dockerfile              # Imagen multi-stage (Python 3.13 + Gunicorn)
+  requirements.txt        # Flask 2.3.3, Gunicorn 23.0.0
+src-go/
+  main.go                 # Aplicación Go
+  main_test.go            # Tests unitarios
+  go.mod                  # Módulo Go
+  Dockerfile              # Imagen multi-stage (Go 1.23)
+k8s/                      # Manifiestos Kubernetes — Python app
+  deployment.yml          # 2 réplicas, rolling update, security context
+  service.yml             # ClusterIP (80 → 5000)
+  ingress.yml             # Ingress Traefik
+  hpa.yml                 # HPA 2-10 pods (CPU 70% / RAM 80%)
+k8s-go/                   # Manifiestos Kubernetes — Go app
+  deployment.yml          # 2 réplicas, rolling update, security context
+  service.yml             # ClusterIP (80 → 8080)
+  ingress.yml             # Ingress Traefik (prefijo /go)
+  middleware.yml          # Traefik Middleware strip-prefix /go
+  hpa.yml                 # HPA 2-10 pods (CPU 70% / RAM 80%)
 ```
 
 ## Pipelines
 
-### CI Python (`ci.yml`) — Se ejecuta en push/PR a `main` (cambios en `src/`)
-1. **SAST** — Análisis estático con CodeQL (Python)
-2. **SCA** — Revisión de dependencias (solo en PRs)
-3. **Container Security** — Escaneo de imagen con Grype/Anchore
+### CI Python — `ci.yml`
+Se ejecuta en push y PR a `main` cuando hay cambios en `src/`.
 
-### CI Go (`ci-go.yml`) — Se ejecuta en push/PR a `main` (cambios en `src-go/`)
-1. **Test** — Tests unitarios con `go test -race`
-2. **SAST** — Análisis estático con CodeQL (Go)
-3. **SCA** — Revisión de dependencias (solo en PRs)
-4. **Container Security** — Escaneo de imagen con Grype/Anchore
+| Job | Herramienta | Cuándo |
+|-----|-------------|--------|
+| SAST | CodeQL (Python, queries `security-extended`) | siempre |
+| SCA | `dependency-review-action` | solo PRs |
+| Container Security | Anchore/Grype → SARIF a GitHub Security | siempre |
 
-### CD (`cd.yml`) — Se ejecuta en push a `main`
-1. **Build** — Construye la imagen Docker y la sube al registry (ACR o ECR)
-2. **Release** — Crea un GitHub Release con tag automático
-3. **Deploy** — Despliega en Kubernetes (AKS o EKS)
+### CI Go — `ci-go.yml`
+Se ejecuta en push y PR a `main` cuando hay cambios en `src-go/`.
 
-### Infraestructura (`infraestructure.yml`) — Ejecución manual
-Crea o destruye la infraestructura cloud (registry + cluster Kubernetes).
+| Job | Herramienta | Cuándo |
+|-----|-------------|--------|
+| Test | `go test -v -race ./...` | siempre |
+| SAST | CodeQL (Go, queries `security-extended`) | siempre |
+| SCA | `dependency-review-action` | solo PRs |
+| Container Security | Anchore/Grype → SARIF a GitHub Security | siempre |
 
-## Configuración de secretos y variables
+### CD Python — `cd.yml`
+Se ejecuta en push a `main` (ignora cambios en `.github/`). El cloud destino se determina por `CLOUD_PROVIDER`.
+
+```
+buildImage → release → deploy (environment: production)
+```
+
+1. **buildImage** — autentifica con ACR o ECR, construye la imagen `src/Dockerfile` y la publica con tag `<sha-short>`.
+2. **release** — crea un GitHub Release con tag `v<YYYYMMDD>-<sha-short>`.
+3. **deploy** — obtiene credenciales del cluster (AKS o EKS), aplica los manifiestos de `k8s/` y actualiza la imagen.
+
+### CD Go — `cd-go.yml`
+Se ejecuta en push a `main` cuando hay cambios en `src-go/` o `k8s-go/`. Flujo idéntico al CD Python pero usa `src-go/Dockerfile`, `k8s-go/` y tag `go-v<YYYYMMDD>-<sha-short>`.
+
+```
+buildImage (incluye go test -race) → release → deploy
+```
+
+### CD Go Multi-Cloud — `cd-go-multicloud.yml`
+Ejecución **manual** (`workflow_dispatch`). Construye la imagen **una sola vez** en GHCR y la promueve en paralelo a ACR y ECR, luego despliega en AKS y EKS simultáneamente.
+
+```
+build_once (GHCR) ──┬── promote_azure (ACR) ── deploy_azure (AKS)
+                    ├── promote_aws   (ECR) ── deploy_aws   (EKS)
+                    └── release (tag go-mc-v<YYYYMMDD>-<sha-short>)
+```
+
+Ventaja: una sola compilación de Docker garantiza que la imagen que llega a ambos clouds es binariamente idéntica.
+
+### Infraestructura — `infraestructure.yml`
+Ejecución **manual**. Seleccionar proveedor (`azure` / `aws`) y acción (`create` / `destroy`).
+
+- **create** — crea ACR/ECR + AKS/EKS (1 nodo `Standard_D2s_v3`) + instala Traefik vía Helm + configura el secret `registry-secret` en el cluster.
+- **destroy** — elimina todos los recursos creados.
+
+### Infraestructura Multi-Cloud — `infra-multicloud.yml`
+Ejecución **manual**. Seleccionar acción (`create` / `destroy`) y dispara `infraestructure.yml` simultáneamente para Azure y AWS.
+
+## Configuración
 
 Configura todo en **GitHub → Settings → Secrets and variables → Actions**.
 
-### Secrets (obligatorios)
+Guia completa paso a paso (secrets, variables y environments): [doc/github-actions-setup.md](doc/github-actions-setup.md)
 
-#### Para Azure:
-| Secret | Descripción |
-|--------|-------------|
-| `AZURE_CREDENTIALS` | JSON con las credenciales del Service Principal de Azure |
+### Secrets
 
-#### Para AWS:
-| Secret | Descripción |
-|--------|-------------|
-| `AWS_ACCESS_KEY_ID` | Access Key ID de IAM |
-| `AWS_SECRET_ACCESS_KEY` | Secret Access Key de IAM |
+| Secret | Proveedor | Descripción |
+|--------|-----------|-------------|
+| `AZURE_CREDENTIALS` | Azure | JSON del Service Principal (ver `doc/azure-credentials-example.json`) |
+| `AWS_ACCESS_KEY_ID` | AWS | Access Key ID de IAM |
+| `AWS_SECRET_ACCESS_KEY` | AWS | Secret Access Key de IAM |
 
-> `GITHUB_TOKEN` se genera automáticamente, no necesitas configurarlo.
+> `GITHUB_TOKEN` se genera automáticamente.
 
-### Variables de repositorio (obligatorias)
+Formato de `AZURE_CREDENTIALS`:
+```json
+{
+  "clientId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "clientSecret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "subscriptionId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "tenantId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+}
+```
 
-| Variable | Descripción | Ejemplo |
-|----------|-------------|---------|
-| `CLOUD_PROVIDER` | Proveedor cloud a usar | `azure` o `aws` |
+### Variables de repositorio
 
-#### Azure:
-| Variable | Descripción | Ejemplo |
-|----------|-------------|---------|
-| `RESOURCE_GROUP` | Resource Group existente | `rg-edteam` |
-| `AKS_NAME` | Nombre del cluster AKS | `aks-edteam` |
-| `CONTAINER_NAME` | Nombre de la imagen | `ed-team-app` |
-| `REGISTRY_NAME` | Nombre del ACR | `acredteamdevsecops` |
-| `AZURE_LOCATION` | Región de Azure | `eastus` |
+| Variable | Descripción | Ejemplo Azure | Ejemplo AWS |
+|----------|-------------|---------------|-------------|
+| `CLOUD_PROVIDER` | Proveedor cloud activo | `azure` | `aws` |
+| `RESOURCE_GROUP` | Resource Group existente | `rg-edteam-devsecops` | — |
+| `AKS_NAME` | Nombre del cluster AKS | `aks-edteam-cluster` | — |
+| `CONTAINER_NAME` | Nombre base de la imagen | `ed-team-app` | — |
+| `REGISTRY_NAME` | Nombre del ACR (sin `.azurecr.io`) | `acredteamdevsecops` | — |
+| `AZURE_LOCATION` | Región de Azure | `eastus` | — |
+| `AWS_REGION` | Región de AWS | — | `us-east-1` |
+| `EKS_CLUSTER_NAME` | Nombre del cluster EKS | — | `eks-ed-team-cluster` |
+| `ECR_REPOSITORY_NAME` | Nombre del repositorio ECR | — | `ed-team-app` |
 
-#### AWS:
-| Variable | Descripción | Ejemplo |
-|----------|-------------|---------|
-| `AWS_REGION` | Región de AWS | `us-east-1` |
-| `EKS_CLUSTER_NAME` | Nombre del cluster EKS | `eks-edteam` |
-| `ECR_REPOSITORY_NAME` | Nombre del repositorio ECR | `ed-team-app` |
+> Los archivos de ejemplo están en `doc/`.
+
+### Environments de GitHub
+
+Crear estos environments en **GitHub → Settings → Environments**:
+
+- `production` (obligatorio para deploy, lo usan `cd.yml` y `cd-go.yml`)
+- `desarrollo` (opcional para pruebas)
+
+Configuración recomendada para `production`:
+
+1. Permitir despliegues solo desde la rama `main`.
+2. Configurar al menos 1 revisor obligatorio antes de desplegar.
+3. (Opcional) Agregar `wait timer` de 5 a 10 minutos.
+4. No requiere environment secrets actualmente (se usan repository secrets).
 
 ## Ejecución local
 
-### Requisitos previos
+### Requisitos
 
-| Herramienta | macOS | Windows |
-|-------------|-------|---------|
-| Python 3.x | `brew install python` | [python.org/downloads](https://www.python.org/downloads/) (marcar "Add to PATH") |
-| pip | Incluido con Python | Incluido con Python |
+| Herramienta | macOS | Linux/Windows |
+|-------------|-------|---------------|
+| Python 3.x | `brew install python` | [python.org](https://www.python.org/downloads/) |
 | Go 1.23+ | `brew install go` | [go.dev/dl](https://go.dev/dl/) |
-| Docker | [Docker Desktop for Mac](https://docs.docker.com/desktop/install/mac-install/) | [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/) |
-| Git | `brew install git` | [git-scm.com](https://git-scm.com/download/win) |
+| Docker | [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/) | [Docker Desktop](https://docs.docker.com/desktop/) |
 
-### Con Python
+### Python
 
-**macOS / Linux (Terminal):**
 ```bash
 cd src
 pip3 install -r requirements.txt
 python3 app.py
-# Disponible en http://localhost:5000
+# http://localhost:5000
 ```
 
-**Windows (PowerShell o CMD):**
-```powershell
-cd src
-pip install -r requirements.txt
-python app.py
-# Disponible en http://localhost:5000
-```
-
-> **Nota Windows:** Si `python` no es reconocido, usa `py` en su lugar:
-> ```powershell
-> py app.py
-> ```
-
-### Con Go
+### Go
 
 ```bash
 cd src-go
 go run main.go
-# Disponible en http://localhost:8080
+# http://localhost:8080
 ```
 
-Tests:
+Tests unitarios:
 ```bash
 cd src-go
-go test -v ./...
+go test -v -race ./...
 ```
 
-### Con Docker (multiplataforma)
+### Docker
 
-Funciona igual en macOS, Windows y Linux (requiere Docker Desktop):
-
-**Python:**
 ```bash
+# Python
 docker build -t ed-team-app src/
 docker run -p 5000:5000 ed-team-app
-# Disponible en http://localhost:5000
-```
 
-**Go:**
-```bash
+# Go
 docker build -t ed-team-app-go src-go/
 docker run -p 8080:8080 ed-team-app-go
-# Disponible en http://localhost:8080
 ```
