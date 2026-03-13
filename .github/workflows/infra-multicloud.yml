@@ -1,0 +1,36 @@
+name: Infrastructure - Multi Cloud
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'create'
+        type: choice
+        options:
+        - create
+        - destroy
+
+jobs:
+  trigger-both-clouds:
+    name: Trigger ${{ inputs.action }} on AWS & Azure
+    runs-on: ubuntu-latest
+    steps:
+    - name: Trigger Azure infrastructure
+      run: |
+        curl -X POST \
+          -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+          "${{ github.api_url }}/repos/${{ github.repository }}/actions/workflows/infraestructure.yml/dispatches" \
+          -d '{"ref":"main","inputs":{"cloud_provider":"azure","action":"${{ inputs.action }}"}}'
+        echo "Azure ${{ inputs.action }} triggered"
+
+    - name: Trigger AWS infrastructure
+      run: |
+        curl -X POST \
+          -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+          "${{ github.api_url }}/repos/${{ github.repository }}/actions/workflows/infraestructure.yml/dispatches" \
+          -d '{"ref":"main","inputs":{"cloud_provider":"aws","action":"${{ inputs.action }}"}}'
+        echo "AWS ${{ inputs.action }} triggered"
