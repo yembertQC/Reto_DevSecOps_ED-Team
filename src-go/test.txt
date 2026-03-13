@@ -13,3 +13,5 @@ azure
 
 
 aws3
+
+azure
