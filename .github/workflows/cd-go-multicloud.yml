@@ -397,23 +397,24 @@ jobs:
       - name: Delete temporary GHCR image tag
         id: cleanup
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OWNER: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ github.token }}
           PACKAGE_NAME: ${{ env.GHCR_IMAGE_NAME }}
           TARGET_TAG: ${{ needs.build_once.outputs.ghcr-tag }}
         run: |
           set +e
-          API="https://api.github.com"
 
-          TYPE=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$API/users/$OWNER" | jq -r '.type // ""')
+          # Detect if owner is org or user and use the correct API scope
+          OWNER="${{ github.repository_owner }}"
+          TYPE=$(gh api "users/$OWNER" --jq '.type' 2>/dev/null || echo "User")
           if [ "$TYPE" = "Organization" ]; then
             SCOPE="orgs/$OWNER"
           else
-            SCOPE="users/$OWNER"
+            SCOPE="user"
           fi
 
-          VERSIONS_JSON=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$API/$SCOPE/packages/container/$PACKAGE_NAME/versions?per_page=100")
-          VERSION_ID=$(echo "$VERSIONS_JSON" | jq -r --arg TAG "$TARGET_TAG" '.[] | select(any(.metadata.container.tags[]?; . == $TAG)) | .id' | head -n1)
+          # List versions and find the one with our tag
+          VERSION_ID=$(gh api "$SCOPE/packages/container/$PACKAGE_NAME/versions" --paginate --jq \
+            ".[] | select(any(.metadata.container.tags[]?; . == \"$TARGET_TAG\")) | .id" 2>/dev/null | head -n1)
 
           if [ -z "$VERSION_ID" ] || [ "$VERSION_ID" = "null" ]; then
             echo "cleanup_status=not-found" >> "$GITHUB_OUTPUT"
@@ -421,17 +422,13 @@ jobs:
             exit 0
           fi
 
-          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "$API/$SCOPE/packages/container/$PACKAGE_NAME/versions/$VERSION_ID")
-
-          if [ "$HTTP_CODE" = "204" ]; then
+          # Delete the version
+          if gh api --method DELETE "$SCOPE/packages/container/$PACKAGE_NAME/versions/$VERSION_ID" 2>/dev/null; then
             echo "cleanup_status=deleted" >> "$GITHUB_OUTPUT"
             echo "cleanup_note=Tag temporal eliminado en GHCR." >> "$GITHUB_OUTPUT"
           else
             echo "cleanup_status=failed" >> "$GITHUB_OUTPUT"
-            echo "cleanup_note=No se pudo eliminar en GHCR (HTTP $HTTP_CODE)." >> "$GITHUB_OUTPUT"
+            echo "cleanup_note=No se pudo eliminar en GHCR (puede requerir PAT con delete:packages)." >> "$GITHUB_OUTPUT"
           fi
 
   final_summary:
