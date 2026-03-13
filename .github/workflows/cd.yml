@@ -358,6 +358,7 @@ jobs:
           echo "⏳ External address still pending..."
           kubectl get service -n traefik traefik
         fi
+        echo "EXTERNAL_ADDR=$EXTERNAL_ADDR" >> $GITHUB_ENV
 
     - name: Deployment summary
       run: |
@@ -374,7 +375,10 @@ jobs:
         echo "- ✅ Health check endpoint responds correctly" >> $GITHUB_STEP_SUMMARY
         echo "- ✅ Application returns 'Hola ED Team'" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 🌐 Testing:" >> $GITHUB_STEP_SUMMARY
-        echo "1. Get external address: \`kubectl get service -n traefik traefik\`" >> $GITHUB_STEP_SUMMARY
-        echo "2. Test with Postman: \`GET http://[EXTERNAL-ADDR]/\`" >> $GITHUB_STEP_SUMMARY
-        echo "3. Expected response: \`{\"message\": \"Hola ED Team\"}\`" >> $GITHUB_STEP_SUMMARY
+        echo "### 🌐 URLs de acceso:" >> $GITHUB_STEP_SUMMARY
+        echo "| Endpoint | URL |" >> $GITHUB_STEP_SUMMARY
+        echo "|----------|-----|" >> $GITHUB_STEP_SUMMARY
+        echo "| App Python | http://${{ env.EXTERNAL_ADDR }}/ |" >> $GITHUB_STEP_SUMMARY
+        echo "| Health check | http://${{ env.EXTERNAL_ADDR }}/health |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Respuesta esperada:** \`{\"message\": \"Hola ED Team\"}\`" >> $GITHUB_STEP_SUMMARY
