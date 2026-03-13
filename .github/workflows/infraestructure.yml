@@ -179,24 +179,84 @@ jobs:
         ACR_LOGIN_SERVER=$(az acr list --resource-group ${{ env.RESOURCE_GROUP }} --query "[0].loginServer" -o tsv)
         ACR_NAME_ONLY=$(az acr list --resource-group ${{ env.RESOURCE_GROUP }} --query "[0].name" -o tsv)
 
+        # Get Traefik LoadBalancer IP
+        TRAEFIK_IP=""
+        for i in $(seq 1 30); do
+          TRAEFIK_IP=$(kubectl get service -n traefik traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+          if [ -n "$TRAEFIK_IP" ]; then break; fi
+          echo "Waiting for Traefik LoadBalancer IP... ($i/30)"
+          sleep 10
+        done
+        if [ -z "$TRAEFIK_IP" ]; then
+          TRAEFIK_IP="(pending - may take a few more minutes)"
+        fi
+
+        # Verify public reachability from GitHub runner
+        INTERNET_STATUS="NOT_CHECKED"
+        INTERNET_DETAILS="LoadBalancer IP pending"
+        if [[ "$TRAEFIK_IP" != \(* ]]; then
+          for i in $(seq 1 20); do
+            HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" "http://$TRAEFIK_IP/" || echo "000")
+            if [ "$HTTP_CODE" != "000" ]; then
+              INTERNET_STATUS="PASS"
+              INTERNET_DETAILS="HTTP $HTTP_CODE from http://$TRAEFIK_IP/"
+              break
+            fi
+            sleep 5
+          done
+        fi
+        if [ "$INTERNET_STATUS" != "PASS" ] && [[ "$TRAEFIK_IP" != \(* ]]; then
+          INTERNET_STATUS="FAIL"
+          INTERNET_DETAILS="No HTTP response from http://$TRAEFIK_IP/"
+        fi
+
+        # Get cluster info
+        K8S_VERSION=$(az aks show --resource-group ${{ env.RESOURCE_GROUP }} --name ${{ env.AKS_NAME }} --query kubernetesVersion -o tsv)
+        NODE_INFO=$(kubectl get nodes -o wide --no-headers 2>/dev/null || echo "No nodes found")
+        TRAEFIK_SVC=$(kubectl get service -n traefik traefik --no-headers 2>/dev/null || echo "Not found")
+
         echo "## 🎉 Azure Infrastructure Created" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 📋 Resources:" >> $GITHUB_STEP_SUMMARY
-        echo "- **Cloud Provider**: Azure" >> $GITHUB_STEP_SUMMARY
-        echo "- **Resource Group**: \`${{ env.RESOURCE_GROUP }}\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **AKS Cluster**: \`${{ env.AKS_NAME }}\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **ACR Registry**: \`$ACR_LOGIN_SERVER\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **Location**: ${{ env.AZURE_LOCATION }}" >> $GITHUB_STEP_SUMMARY
+        echo "| Resource | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Cloud Provider | Azure |" >> $GITHUB_STEP_SUMMARY
+        echo "| Resource Group | \`${{ env.RESOURCE_GROUP }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| AKS Cluster | \`${{ env.AKS_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Kubernetes Version | \`$K8S_VERSION\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| ACR Registry | \`$ACR_LOGIN_SERVER\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Location | ${{ env.AZURE_LOCATION }} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🌐 Traefik Ingress (LoadBalancer):" >> $GITHUB_STEP_SUMMARY
+        echo "- **External IP**: \`$TRAEFIK_IP\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **Internet Reachability**: **$INTERNET_STATUS**" >> $GITHUB_STEP_SUMMARY
+        echo "- **Check Detail**: $INTERNET_DETAILS" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "$TRAEFIK_SVC" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🖥️ Nodes:" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "$NODE_INFO" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🧪 Test your cluster:" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "# App Python" >> $GITHUB_STEP_SUMMARY
+        echo "curl http://$TRAEFIK_IP/" >> $GITHUB_STEP_SUMMARY
+        echo "# App Go" >> $GITHUB_STEP_SUMMARY
+        echo "curl http://$TRAEFIK_IP/go/" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🔧 Next Steps:" >> $GITHUB_STEP_SUMMARY
         echo "1. Set variable \`CLOUD_PROVIDER\` = \`azure\`" >> $GITHUB_STEP_SUMMARY
         echo "2. Set variable \`REGISTRY_NAME\` = \`$ACR_NAME_ONLY\`" >> $GITHUB_STEP_SUMMARY
         echo "3. Push code to main to trigger deployment" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 💡 Commands:" >> $GITHUB_STEP_SUMMARY
+        echo "### 💡 Local access (optional):" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
         echo "az aks get-credentials --resource-group ${{ env.RESOURCE_GROUP }} --name ${{ env.AKS_NAME }}" >> $GITHUB_STEP_SUMMARY
-        echo "kubectl get service -n traefik traefik" >> $GITHUB_STEP_SUMMARY
+        echo "kubectl get pods" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
   # ===============================
@@ -685,22 +745,87 @@ jobs:
         AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
         ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY_NAME }}"
 
+        # Get Traefik LoadBalancer hostname/IP
+        TRAEFIK_HOST=""
+        for i in $(seq 1 30); do
+          TRAEFIK_HOST=$(kubectl get service -n traefik traefik -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+          if [ -z "$TRAEFIK_HOST" ]; then
+            TRAEFIK_HOST=$(kubectl get service -n traefik traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+          fi
+          if [ -n "$TRAEFIK_HOST" ]; then break; fi
+          echo "Waiting for Traefik LoadBalancer... ($i/30)"
+          sleep 10
+        done
+        if [ -z "$TRAEFIK_HOST" ]; then
+          TRAEFIK_HOST="(pending - may take a few more minutes)"
+        fi
+
+        # Verify public reachability from GitHub runner
+        INTERNET_STATUS="NOT_CHECKED"
+        INTERNET_DETAILS="LoadBalancer hostname/IP pending"
+        if [[ "$TRAEFIK_HOST" != \(* ]]; then
+          for i in $(seq 1 20); do
+            HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" "http://$TRAEFIK_HOST/" || echo "000")
+            if [ "$HTTP_CODE" != "000" ]; then
+              INTERNET_STATUS="PASS"
+              INTERNET_DETAILS="HTTP $HTTP_CODE from http://$TRAEFIK_HOST/"
+              break
+            fi
+            sleep 5
+          done
+        fi
+        if [ "$INTERNET_STATUS" != "PASS" ] && [[ "$TRAEFIK_HOST" != \(* ]]; then
+          INTERNET_STATUS="FAIL"
+          INTERNET_DETAILS="No HTTP response from http://$TRAEFIK_HOST/"
+        fi
+
+        # Get cluster info
+        EKS_VERSION=$(aws eks describe-cluster --name ${{ env.EKS_CLUSTER_NAME }} --query "cluster.version" --output text)
+        EKS_ENDPOINT=$(aws eks describe-cluster --name ${{ env.EKS_CLUSTER_NAME }} --query "cluster.endpoint" --output text)
+        NODE_INFO=$(kubectl get nodes -o wide --no-headers 2>/dev/null || echo "No nodes found")
+        TRAEFIK_SVC=$(kubectl get service -n traefik traefik --no-headers 2>/dev/null || echo "Not found")
+
         echo "## 🎉 AWS Infrastructure Created" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 📋 Resources:" >> $GITHUB_STEP_SUMMARY
-        echo "- **Cloud Provider**: AWS" >> $GITHUB_STEP_SUMMARY
-        echo "- **EKS Cluster**: \`${{ env.EKS_CLUSTER_NAME }}\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **ECR Repository**: \`$ECR_URI\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **Region**: ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
+        echo "| Resource | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Cloud Provider | AWS |" >> $GITHUB_STEP_SUMMARY
+        echo "| EKS Cluster | \`${{ env.EKS_CLUSTER_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Kubernetes Version | \`$EKS_VERSION\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| ECR Repository | \`$ECR_URI\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Region | ${{ env.AWS_REGION }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| API Endpoint | \`$EKS_ENDPOINT\` |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🌐 Traefik Ingress (LoadBalancer):" >> $GITHUB_STEP_SUMMARY
+        echo "- **External Host**: \`$TRAEFIK_HOST\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **Internet Reachability**: **$INTERNET_STATUS**" >> $GITHUB_STEP_SUMMARY
+        echo "- **Check Detail**: $INTERNET_DETAILS" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "$TRAEFIK_SVC" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🖥️ Nodes:" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "$NODE_INFO" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🧪 Test your cluster:" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "# App Python" >> $GITHUB_STEP_SUMMARY
+        echo "curl http://$TRAEFIK_HOST/" >> $GITHUB_STEP_SUMMARY
+        echo "# App Go" >> $GITHUB_STEP_SUMMARY
+        echo "curl http://$TRAEFIK_HOST/go/" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🔧 Next Steps:" >> $GITHUB_STEP_SUMMARY
         echo "1. Set variable \`CLOUD_PROVIDER\` = \`aws\`" >> $GITHUB_STEP_SUMMARY
         echo "2. Push code to main to trigger deployment" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 💡 Commands:" >> $GITHUB_STEP_SUMMARY
+        echo "### 💡 Local access (optional):" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
         echo "aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
-        echo "kubectl get service -n traefik traefik" >> $GITHUB_STEP_SUMMARY
+        echo "kubectl get pods" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
   # ============================
