@@ -199,6 +199,7 @@ jobs:
           ACR_USERNAME=$(az acr credential show --name ${{ env.REGISTRY_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} --query username -o tsv)
           ACR_PASSWORD=$(az acr credential show --name ${{ env.REGISTRY_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} --query passwords[0].value -o tsv)
           kubectl create secret docker-registry registry-secret \
+            --namespace=default \
             --docker-server=${{ env.REGISTRY_NAME }}.azurecr.io \
             --docker-username=$ACR_USERNAME \
             --docker-password=$ACR_PASSWORD \
@@ -231,6 +232,7 @@ jobs:
         ECR_SERVER="${AWS_ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
 
         kubectl create secret docker-registry registry-secret \
+          --namespace=default \
           --docker-server=$ECR_SERVER \
           --docker-username=AWS \
           --docker-password=$ECR_PASSWORD \
@@ -255,8 +257,12 @@ jobs:
     - name: Deploy to Kubernetes
       run: |
         echo "Deploying to cluster..."
-        kubectl apply -f k8s-go/
-        kubectl rollout status deployment/ed-team-app-go --timeout=600s
+        kubectl apply -f k8s-go/middleware.yml
+        kubectl apply -f k8s-go/service.yml
+        kubectl apply -f k8s-go/deployment.yml
+        kubectl rollout status -n default deployment/ed-team-app-go --timeout=600s
+        kubectl apply -f k8s-go/hpa.yml
+        kubectl apply -f k8s-go/ingress.yml
         echo "Deployment completed!"
 
     - name: Verify deployment
@@ -264,19 +270,19 @@ jobs:
         echo "=== DEPLOYMENT VERIFICATION ==="
         echo ""
         echo "Pods:"
-        kubectl get pods -l app=ed-team-app-go -o wide
+        kubectl get pods -n default -l app=ed-team-app-go -o wide
         echo ""
         echo "Services:"
-        kubectl get services
+        kubectl get services -n default
         echo ""
         echo "Ingress:"
-        kubectl get ingress
+        kubectl get ingress -n default
         echo ""
         echo "HPA:"
-        kubectl get hpa
+        kubectl get hpa -n default
         echo ""
         echo "Deployment details:"
-        kubectl describe deployment ed-team-app-go
+        kubectl describe deployment -n default ed-team-app-go
 
   validate:
     name: Post-Deploy Validation
@@ -319,9 +325,9 @@ jobs:
       run: |
         echo "Testing application health..."
 
-        kubectl wait --for=condition=ready pod -l app=ed-team-app-go --timeout=300s
+        kubectl wait -n default --for=condition=ready pod -l app=ed-team-app-go --timeout=300s
 
-        kubectl port-forward service/ed-team-app-go-service 8080:80 &
+        kubectl port-forward -n default service/ed-team-app-go-service 8080:80 &
         PF_PID=$!
         sleep 15
 

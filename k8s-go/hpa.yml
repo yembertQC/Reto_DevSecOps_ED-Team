@@ -2,6 +2,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: ed-team-app-go-hpa
+  namespace: default
   labels:
     app: ed-team-app-go
   annotations:

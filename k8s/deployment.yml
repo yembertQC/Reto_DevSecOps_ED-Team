@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ed-team-app
+  namespace: default
   labels:
     app: ed-team-app
     version: v1

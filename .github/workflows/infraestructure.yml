@@ -122,6 +122,7 @@ jobs:
         ACR_PASSWORD=$(az acr credential show --name $ACR_NAME --resource-group ${{ env.RESOURCE_GROUP }} --query passwords[0].value -o tsv)
 
         kubectl create secret docker-registry registry-secret \
+          --namespace=default \
           --docker-server=$ACR_SERVER \
           --docker-username=$ACR_USERNAME \
           --docker-password=$ACR_PASSWORD \
@@ -694,6 +695,7 @@ jobs:
         ECR_PASSWORD=$(aws ecr get-login-password --region ${{ env.AWS_REGION }})
         ECR_SERVER="${AWS_ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
         kubectl create secret docker-registry registry-secret \
+          --namespace=default \
           --docker-server=$ECR_SERVER \
           --docker-username=AWS \
           --docker-password=$ECR_PASSWORD \
