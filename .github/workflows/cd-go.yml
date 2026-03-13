@@ -352,7 +352,7 @@ jobs:
         EXTERNAL_NOTE="LoadBalancer hostname/ip still pending"
 
         if [ "${{ env.CLOUD_PROVIDER }}" = "aws" ]; then
-          for i in $(seq 1 30); do
+          for i in $(seq 1 12); do
             CANDIDATE=$(kubectl get service -n traefik traefik -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
             if [ -z "$CANDIDATE" ]; then
               CANDIDATE=$(kubectl get service -n traefik traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
@@ -372,7 +372,7 @@ jobs:
               fi
 
               if [ "$DNS_OK" -eq 0 ]; then
-                CODE=$(curl -sS -m 8 -o /dev/null -w "%{http_code}" "http://$EXTERNAL_ADDR/go/health" || echo "000")
+                CODE=$(curl -sS -m 5 -o /dev/null -w "%{http_code}" "http://$EXTERNAL_ADDR/go/health" || echo "000")
                 if [ "$CODE" = "200" ]; then
                   EXTERNAL_STATUS="ready"
                   EXTERNAL_NOTE="DNS and HTTP health check OK"
@@ -386,7 +386,7 @@ jobs:
                 EXTERNAL_NOTE="Hostname allocated but DNS not propagated yet"
               fi
             fi
-            sleep 10
+            sleep 5
           done
         else
           EXTERNAL_ADDR=$(kubectl get service -n traefik traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")

@@ -548,6 +548,9 @@ jobs:
             --protocol tcp --port 80 --cidr 0.0.0.0/0
           aws ec2 authorize-security-group-ingress --group-id $NODE_SG \
             --protocol tcp --port 443 --cidr 0.0.0.0/0
+          # NodePort range for NLB -> Node traffic (NLB forwards to NodePorts, not port 80/443 directly)
+          aws ec2 authorize-security-group-ingress --group-id $NODE_SG \
+            --protocol tcp --port 30000-32767 --cidr 0.0.0.0/0
           # Node -> Internet (for pulling images)
           aws ec2 authorize-security-group-egress --group-id $NODE_SG \
             --protocol all --cidr 0.0.0.0/0 2>/dev/null || true
