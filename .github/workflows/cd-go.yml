@@ -362,10 +362,13 @@ jobs:
               EXTERNAL_ADDR="$CANDIDATE"
 
               if echo "$EXTERNAL_ADDR" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-                DNS_OK=1
+                DNS_OK=0
               else
-                getent hosts "$EXTERNAL_ADDR" >/dev/null 2>&1
-                DNS_OK=$?
+                if getent hosts "$EXTERNAL_ADDR" >/dev/null 2>&1; then
+                  DNS_OK=0
+                else
+                  DNS_OK=1
+                fi
               fi
 
               if [ "$DNS_OK" -eq 0 ]; then
@@ -436,6 +439,9 @@ jobs:
         echo "|----------|-----|" >> $GITHUB_STEP_SUMMARY
         echo "| App Go | http://$EXTERNAL_ADDR/go |" >> $GITHUB_STEP_SUMMARY
         echo "| Health check | http://$EXTERNAL_ADDR/go/health |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🌍 External Address" >> $GITHUB_STEP_SUMMARY
+        echo "- Traefik IP/Host: \`$EXTERNAL_ADDR\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### Reachability Check" >> $GITHUB_STEP_SUMMARY
         echo "- Status: **$EXTERNAL_STATUS**" >> $GITHUB_STEP_SUMMARY
