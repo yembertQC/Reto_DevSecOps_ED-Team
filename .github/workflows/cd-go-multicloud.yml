@@ -278,6 +278,8 @@ jobs:
       external_addr: ${{ steps.access.outputs.external_addr }}
       app_url: ${{ steps.access.outputs.app_url }}
       health_url: ${{ steps.access.outputs.health_url }}
+      external_status: ${{ steps.access.outputs.external_status }}
+      external_note: ${{ steps.access.outputs.external_note }}
 
     steps:
       - name: Checkout
@@ -323,12 +325,47 @@ jobs:
       - name: Get external access info
         id: access
         run: |
-          EXTERNAL_ADDR=$(kubectl get service -n traefik traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-          if [ -z "$EXTERNAL_ADDR" ]; then
-            EXTERNAL_ADDR=$(kubectl get service -n traefik traefik -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
-          fi
+          EXTERNAL_ADDR=""
+          EXTERNAL_STATUS="pending"
+          EXTERNAL_NOTE="LoadBalancer hostname/ip still pending"
 
-          if [ "$EXTERNAL_ADDR" != "pending" ] && [ -n "$EXTERNAL_ADDR" ]; then
+          for i in $(seq 1 30); do
+            CANDIDATE=$(kubectl get service -n traefik traefik -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+            if [ -z "$CANDIDATE" ]; then
+              CANDIDATE=$(kubectl get service -n traefik traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+            fi
+
+            if [ -n "$CANDIDATE" ]; then
+              EXTERNAL_ADDR="$CANDIDATE"
+
+              # If AWS gives hostname, ensure DNS is resolvable before publishing.
+              if echo "$EXTERNAL_ADDR" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+                DNS_OK=1
+              else
+                getent hosts "$EXTERNAL_ADDR" >/dev/null 2>&1
+                DNS_OK=$?
+              fi
+
+              if [ "$DNS_OK" -eq 0 ]; then
+                CODE=$(curl -sS -m 8 -o /dev/null -w "%{http_code}" "http://$EXTERNAL_ADDR/go/health" || echo "000")
+                if [ "$CODE" = "200" ]; then
+                  EXTERNAL_STATUS="ready"
+                  EXTERNAL_NOTE="DNS and HTTP health check OK"
+                  break
+                else
+                  EXTERNAL_STATUS="dns-ok-http-pending"
+                  EXTERNAL_NOTE="DNS resolved but /go/health returned HTTP $CODE"
+                fi
+              else
+                EXTERNAL_STATUS="dns-pending"
+                EXTERNAL_NOTE="Hostname allocated but DNS not propagated yet"
+              fi
+            fi
+
+            sleep 10
+          done
+
+          if [ -n "$EXTERNAL_ADDR" ]; then
             echo "external_addr=$EXTERNAL_ADDR" >> "$GITHUB_OUTPUT"
             echo "app_url=http://$EXTERNAL_ADDR/go" >> "$GITHUB_OUTPUT"
             echo "health_url=http://$EXTERNAL_ADDR/go/health" >> "$GITHUB_OUTPUT"
@@ -337,6 +374,9 @@ jobs:
             echo "app_url=pending" >> "$GITHUB_OUTPUT"
             echo "health_url=pending" >> "$GITHUB_OUTPUT"
           fi
+
+          echo "external_status=$EXTERNAL_STATUS" >> "$GITHUB_OUTPUT"
+          echo "external_note=$EXTERNAL_NOTE" >> "$GITHUB_OUTPUT"
 
   cleanup_ghcr:
     name: Cleanup GHCR Temp Image
@@ -427,6 +467,10 @@ jobs:
           echo "|-------|---------|------------|------------------|" >> "$GITHUB_STEP_SUMMARY"
           echo "| Azure | ${{ needs.deploy_azure.outputs.app_url || 'pending' }} | ${{ needs.deploy_azure.outputs.health_url || 'pending' }} | ${{ needs.deploy_azure.outputs.external_addr || 'pending' }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| AWS | ${{ needs.deploy_aws.outputs.app_url || 'pending' }} | ${{ needs.deploy_aws.outputs.health_url || 'pending' }} | ${{ needs.deploy_aws.outputs.external_addr || 'pending' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### AWS Reachability Check" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Status: **${{ needs.deploy_aws.outputs.external_status || 'pending' }}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Detail: ${{ needs.deploy_aws.outputs.external_note || 'No detail' }}" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### GHCR Cleanup" >> "$GITHUB_STEP_SUMMARY"
           echo "- Status: **${{ needs.cleanup_ghcr.outputs.cleanup-status }}**" >> "$GITHUB_STEP_SUMMARY"
