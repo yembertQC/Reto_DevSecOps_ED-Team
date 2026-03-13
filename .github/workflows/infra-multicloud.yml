@@ -12,25 +12,34 @@ on:
         - create
         - destroy
 
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   trigger-both-clouds:
     name: Trigger ${{ inputs.action }} on AWS & Azure
     runs-on: ubuntu-latest
     steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
     - name: Trigger Azure infrastructure
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: |
-        curl -X POST \
-          -H "Accept: application/vnd.github.v3+json" \
-          -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-          "${{ github.api_url }}/repos/${{ github.repository }}/actions/workflows/infraestructure.yml/dispatches" \
-          -d '{"ref":"main","inputs":{"cloud_provider":"azure","action":"${{ inputs.action }}"}}'
+        gh workflow run infraestructure.yml \
+          --ref main \
+          -f cloud_provider=azure \
+          -f action=${{ inputs.action }}
         echo "Azure ${{ inputs.action }} triggered"
 
     - name: Trigger AWS infrastructure
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: |
-        curl -X POST \
-          -H "Accept: application/vnd.github.v3+json" \
-          -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-          "${{ github.api_url }}/repos/${{ github.repository }}/actions/workflows/infraestructure.yml/dispatches" \
-          -d '{"ref":"main","inputs":{"cloud_provider":"aws","action":"${{ inputs.action }}"}}'
+        gh workflow run infraestructure.yml \
+          --ref main \
+          -f cloud_provider=aws \
+          -f action=${{ inputs.action }}
         echo "AWS ${{ inputs.action }} triggered"
