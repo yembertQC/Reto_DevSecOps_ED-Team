@@ -4,5 +4,7 @@
   "AKS_NAME": "aks-edteam-cluster",
   "CONTAINER_NAME": "ed-team-app",
   "REGISTRY_NAME": "acredteamdevsecops",
-  "AZURE_LOCATION": "eastus"
+  "AZURE_LOCATION": "eastus",
+  "FUNCTION_APP_NAME": "func-edteam-devsecops",
+  "FUNCTION_STORAGE_ACCOUNT": "edteamsa001"
 }

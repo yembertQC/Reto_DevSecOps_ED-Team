@@ -19,6 +19,14 @@ on:
         options:
         - create
         - destroy
+      deployment_mode:
+        description: 'Deployment mode for Azure'
+        required: true
+        default: 'kubernetes'
+        type: choice
+        options:
+        - kubernetes
+        - serverless
 
 env:
   # Azure
@@ -26,6 +34,8 @@ env:
   AKS_NAME: ${{ vars.AKS_NAME }}
   CONTAINER_NAME: ${{ vars.CONTAINER_NAME }}
   AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+  FUNCTION_APP_NAME: ${{ vars.FUNCTION_APP_NAME }}
+  FUNCTION_STORAGE_ACCOUNT: ${{ vars.FUNCTION_STORAGE_ACCOUNT }}
   # AWS
   AWS_REGION: ${{ vars.AWS_REGION }}
   EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
@@ -50,6 +60,7 @@ jobs:
         creds: ${{ secrets.AZURE_CREDENTIALS }}
 
     - name: Create Azure Infrastructure
+      if: ${{ inputs.deployment_mode == 'kubernetes' }}
       run: |
         echo "=== CREATING AZURE INFRASTRUCTURE ==="
         echo ""
@@ -154,7 +165,65 @@ jobs:
         echo ""
         echo "=== AZURE INFRASTRUCTURE CREATED SUCCESSFULLY ==="
 
+    - name: Create Azure Serverless Infrastructure
+      if: ${{ inputs.deployment_mode == 'serverless' }}
+      run: |
+        echo "=== CREATING AZURE SERVERLESS INFRASTRUCTURE ==="
+        echo ""
+        echo "Resources to create:"
+        echo "- Resource Group: ${{ env.RESOURCE_GROUP }} (using existing)"
+        echo "- Function App: ${{ env.FUNCTION_APP_NAME }}"
+        echo "- Storage Account: ${{ env.FUNCTION_STORAGE_ACCOUNT }}"
+        echo "- Location: ${{ env.AZURE_LOCATION }}"
+        echo ""
+
+        if [ -z "${{ env.FUNCTION_APP_NAME }}" ] || [ -z "${{ env.FUNCTION_STORAGE_ACCOUNT }}" ]; then
+          echo "❌ Missing FUNCTION_APP_NAME or FUNCTION_STORAGE_ACCOUNT repository variables"
+          exit 1
+        fi
+
+        if az group show --name ${{ env.RESOURCE_GROUP }} > /dev/null 2>&1; then
+          echo "✅ Resource Group exists: ${{ env.RESOURCE_GROUP }}"
+        else
+          echo "❌ Resource Group not found: ${{ env.RESOURCE_GROUP }}"
+          exit 1
+        fi
+
+        echo "💾 Creating Storage Account..."
+        if az storage account show --name ${{ env.FUNCTION_STORAGE_ACCOUNT }} --resource-group ${{ env.RESOURCE_GROUP }} > /dev/null 2>&1; then
+          echo "⚠️ Storage account already exists: ${{ env.FUNCTION_STORAGE_ACCOUNT }}"
+        else
+          az storage account create \
+            --name ${{ env.FUNCTION_STORAGE_ACCOUNT }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --location ${{ env.AZURE_LOCATION }} \
+            --sku Standard_LRS \
+            --kind StorageV2 \
+            --allow-blob-public-access false
+          echo "✅ Storage account created"
+        fi
+
+        echo "⚡ Creating Function App..."
+        if az functionapp show --resource-group ${{ env.RESOURCE_GROUP }} --name ${{ env.FUNCTION_APP_NAME }} > /dev/null 2>&1; then
+          echo "⚠️ Function App already exists: ${{ env.FUNCTION_APP_NAME }}"
+        else
+          az functionapp create \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --consumption-plan-location ${{ env.AZURE_LOCATION }} \
+            --runtime python \
+            --runtime-version 3.11 \
+            --functions-version 4 \
+            --name ${{ env.FUNCTION_APP_NAME }} \
+            --storage-account ${{ env.FUNCTION_STORAGE_ACCOUNT }} \
+            --os-type Linux
+          echo "✅ Function App created"
+        fi
+
+        echo ""
+        echo "=== AZURE SERVERLESS INFRASTRUCTURE CREATED SUCCESSFULLY ==="
+
     - name: Verify Azure Infrastructure
+      if: ${{ inputs.deployment_mode == 'kubernetes' }}
       run: |
         echo "🔍 === VERIFYING AZURE INFRASTRUCTURE ==="
         echo ""
@@ -175,7 +244,27 @@ jobs:
         echo ""
         echo "✅ All Azure components verified!"
 
+    - name: Verify Azure Serverless Infrastructure
+      if: ${{ inputs.deployment_mode == 'serverless' }}
+      run: |
+        echo "🔍 === VERIFYING AZURE SERVERLESS INFRASTRUCTURE ==="
+        echo ""
+        echo "⚡ Function App:"
+        az functionapp show \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --name ${{ env.FUNCTION_APP_NAME }} \
+          --query "{Name:name, State:state, DefaultHostName:defaultHostName}" -o table
+        echo ""
+        echo "💾 Storage Account:"
+        az storage account show \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --name ${{ env.FUNCTION_STORAGE_ACCOUNT }} \
+          --query "{Name:name, Location:primaryLocation, ProvisioningState:provisioningState}" -o table
+        echo ""
+        echo "✅ Azure serverless components verified!"
+
     - name: Generate Azure Summary
+      if: ${{ inputs.deployment_mode == 'kubernetes' }}
       run: |
         ACR_LOGIN_SERVER=$(az acr list --resource-group ${{ env.RESOURCE_GROUP }} --query "[0].loginServer" -o tsv)
         ACR_NAME_ONLY=$(az acr list --resource-group ${{ env.RESOURCE_GROUP }} --query "[0].name" -o tsv)
@@ -260,6 +349,26 @@ jobs:
         echo "kubectl get pods" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
+    - name: Generate Azure Serverless Summary
+      if: ${{ inputs.deployment_mode == 'serverless' }}
+      run: |
+        FUNCTION_HOSTNAME=$(az functionapp show --resource-group ${{ env.RESOURCE_GROUP }} --name ${{ env.FUNCTION_APP_NAME }} --query defaultHostName -o tsv)
+
+        echo "## 🎉 Azure Serverless Infrastructure Created" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📋 Resources:" >> $GITHUB_STEP_SUMMARY
+        echo "| Resource | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Cloud Provider | Azure |" >> $GITHUB_STEP_SUMMARY
+        echo "| Deployment Mode | Serverless |" >> $GITHUB_STEP_SUMMARY
+        echo "| Resource Group | \`${{ env.RESOURCE_GROUP }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Function App | \`${{ env.FUNCTION_APP_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Storage Account | \`${{ env.FUNCTION_STORAGE_ACCOUNT }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Location | ${{ env.AZURE_LOCATION }} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🌐 Endpoint:" >> $GITHUB_STEP_SUMMARY
+        echo "- \`https://$FUNCTION_HOSTNAME\`" >> $GITHUB_STEP_SUMMARY
+
   # ===============================
   # AZURE - Destroy Infrastructure
   # ===============================
@@ -278,6 +387,7 @@ jobs:
         creds: ${{ secrets.AZURE_CREDENTIALS }}
 
     - name: Destroy Azure Infrastructure
+      if: ${{ inputs.deployment_mode == 'kubernetes' }}
       run: |
         echo "=== DESTROYING AZURE INFRASTRUCTURE ==="
         echo ""
@@ -316,13 +426,61 @@ jobs:
           echo "❌ Resource Group doesn't exist: ${{ env.RESOURCE_GROUP }}"
         fi
 
+    - name: Destroy Azure Serverless Infrastructure
+      if: ${{ inputs.deployment_mode == 'serverless' }}
+      run: |
+        echo "=== DESTROYING AZURE SERVERLESS INFRASTRUCTURE ==="
+        echo ""
+        echo "⚠️ This will delete Function App and Storage Account from: ${{ env.RESOURCE_GROUP }}"
+        echo "📦 Resource Group will NOT be deleted"
+        echo ""
+
+        if az group show --name ${{ env.RESOURCE_GROUP }} > /dev/null 2>&1; then
+          if az functionapp show --resource-group ${{ env.RESOURCE_GROUP }} --name ${{ env.FUNCTION_APP_NAME }} > /dev/null 2>&1; then
+            echo "🗑️ Deleting Function App: ${{ env.FUNCTION_APP_NAME }}..."
+            az functionapp delete --resource-group ${{ env.RESOURCE_GROUP }} --name ${{ env.FUNCTION_APP_NAME }}
+            echo "✅ Function App deleted"
+          else
+            echo "- Function App: Not found"
+          fi
+
+          if az storage account show --resource-group ${{ env.RESOURCE_GROUP }} --name ${{ env.FUNCTION_STORAGE_ACCOUNT }} > /dev/null 2>&1; then
+            echo "🗑️ Deleting Storage Account: ${{ env.FUNCTION_STORAGE_ACCOUNT }}..."
+            az storage account delete \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --name ${{ env.FUNCTION_STORAGE_ACCOUNT }} \
+              --yes
+            echo "✅ Storage Account deleted"
+          else
+            echo "- Storage Account: Not found"
+          fi
+
+          echo ""
+          echo "✅ Azure serverless cleanup completed"
+          echo "📦 Resource Group '${{ env.RESOURCE_GROUP }}' preserved"
+        else
+          echo "❌ Resource Group doesn't exist: ${{ env.RESOURCE_GROUP }}"
+        fi
+
     - name: Generate Azure Cleanup Summary
+      if: ${{ inputs.deployment_mode == 'kubernetes' }}
       run: |
         echo "## 🗑️ Azure Infrastructure Cleanup" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "- **Cloud Provider**: Azure" >> $GITHUB_STEP_SUMMARY
         echo "- **AKS Cluster**: 🗑️ Deleted" >> $GITHUB_STEP_SUMMARY
         echo "- **ACR Registry**: 🗑️ Deleted" >> $GITHUB_STEP_SUMMARY
+        echo "- **Resource Group**: ✅ Preserved" >> $GITHUB_STEP_SUMMARY
+
+    - name: Generate Azure Serverless Cleanup Summary
+      if: ${{ inputs.deployment_mode == 'serverless' }}
+      run: |
+        echo "## 🗑️ Azure Serverless Infrastructure Cleanup" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **Cloud Provider**: Azure" >> $GITHUB_STEP_SUMMARY
+        echo "- **Deployment Mode**: Serverless" >> $GITHUB_STEP_SUMMARY
+        echo "- **Function App**: 🗑️ Deleted" >> $GITHUB_STEP_SUMMARY
+        echo "- **Storage Account**: 🗑️ Deleted" >> $GITHUB_STEP_SUMMARY
         echo "- **Resource Group**: ✅ Preserved" >> $GITHUB_STEP_SUMMARY
 
   # ===========================
