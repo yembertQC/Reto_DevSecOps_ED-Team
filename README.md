@@ -108,7 +108,9 @@ Ventaja: una sola compilación de Docker garantiza que la imagen que llega a amb
 ### Infraestructura — `infraestructure.yml`
 Ejecución **manual**. Seleccionar proveedor (`azure` / `aws`) y acción (`create` / `destroy`).
 
-- **create** — crea ACR/ECR + AKS/EKS (1 nodo `Standard_D2s_v3`) + instala Traefik vía Helm + configura el secret `registry-secret` en el cluster.
+- **Azure + kubernetes** — crea ACR + AKS (1 nodo `Standard_D2s_v3`) + instala Traefik vía Helm + configura el secret `registry-secret` en el cluster.
+- **Azure + serverless** — crea `Function App` (Python 3.11, Functions v4, Linux Consumption) y su `Storage Account`.
+- **AWS** — crea ECR + EKS (1 nodo `t3.medium`) + infraestructura base de red y acceso al cluster.
 - **destroy** — elimina todos los recursos creados.
 
 ### Infraestructura Multi-Cloud — `infra-multicloud.yml`
@@ -150,6 +152,8 @@ Formato de `AZURE_CREDENTIALS`:
 | `CONTAINER_NAME` | Nombre base de la imagen | `ed-team-app` | — |
 | `REGISTRY_NAME` | Nombre del ACR (sin `.azurecr.io`) | `acredteamdevsecops` | — |
 | `AZURE_LOCATION` | Región de Azure | `eastus` | — |
+| `FUNCTION_APP_NAME` | Nombre del Azure Function App (serverless) | `func-edteam-devsecops` | — |
+| `FUNCTION_STORAGE_ACCOUNT` | Storage account usado por Azure Functions | `edteamsa001` | — |
 | `AWS_REGION` | Región de AWS | — | `us-east-1` |
 | `EKS_CLUSTER_NAME` | Nombre del cluster EKS | — | `eks-ed-team-cluster` |
 | `ECR_REPOSITORY_NAME` | Nombre del repositorio ECR | — | `ed-team-app` |

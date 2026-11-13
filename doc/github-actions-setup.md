@@ -42,6 +42,8 @@ Crear exactamente estos nombres en Repository variables:
 | CONTAINER_NAME | ed-team-app | Base de nombre de imagen |
 | REGISTRY_NAME | acredteamdevsecops | Azure Container Registry |
 | AZURE_LOCATION | eastus | Region de Azure |
+| FUNCTION_APP_NAME | func-edteam-devsecops | Azure Function App (serverless) |
+| FUNCTION_STORAGE_ACCOUNT | edteamsa001 | Storage account para Azure Functions |
 | AWS_REGION | us-east-1 | Region AWS |
 | EKS_CLUSTER_NAME | cve01aws | AWS cluster |
 | ECR_REPOSITORY_NAME | registryedteamdevsecops | AWS ECR |
@@ -95,5 +97,5 @@ En Settings -> Environments -> production configurar:
 2. Variables creadas con nombres exactos
 3. Environment production creado
 4. Environment production con branch main permitido
-5. Lanzar workflow manual .github/workflows/infraestructure.yml con action=create para validar credenciales
+5. Lanzar workflow manual .github/workflows/infraestructure.yml con action=create y deployment_mode (kubernetes o serverless) para validar credenciales
 6. Hacer push a main para validar .github/workflows/cd.yml o .github/workflows/cd-go.yml segun app
